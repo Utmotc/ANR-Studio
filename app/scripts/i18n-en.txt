@@ -1,0 +1,420 @@
+Apex Neural Rendering is a frame-generation / upscaling DLL injected into games through OptiScaler. Turn on frame generation in-game to raise FPS without changing your GPU.
+This tool reads Steam's libraryfolders.vdf, Epic manifests and the GOG registry to find installed games; you can add a folder manually if scanning misses it.
+Turns "which game, which version, is frame generation on" into visible state. Install and uninstall call the official scripts; settings are read from and written to OptiScaler.ini.
+Uninstalling an add-on install only removes the ANR directory and restores OptiScaler.ini to its pre-install value. Your existing OptiScaler is untouched.
+Uninstalling a full install deletes the game's entire OptiScaler directory and restores the original dxgi.dll and OptiScaler.ini.
+Your Steam / Epic / GOG libraries are scanned automatically. For games not in the list, click "Add game folder" or drag a folder into the window.
+Auto: use official Steam covers when reachable, otherwise fall back to domestic sources; Domestic: 360 Images; Global: Steam / GOG
+If the official SHA256SUMS.txt cannot be obtained, installation is refused; a checksum mismatch deletes the package. Locally imported packages follow the same rule — there is no skip option.
+Injecting DLLs into online games with anti-cheat carries a ban risk; single-player use is recommended. This tool never modifies game files or writes to memory.
+The provider (nvngx_dlssg.dll) is now signed by Apex Compute, Inc.
+Will restore: FGInput / FGNvngxReplacement in OptiScaler.ini
+This OptiScaler was not installed by this tool. To avoid overwriting your configuration, the add-on install method will be used automatically.
+Will remove: OptiScaler\\custom\\Apex Neural Rendering FG
+Will delete: OptiScaler\\custom\\Apex Neural Rendering FG
+Installers cannot write to the same directory at once. 1 = strict serial (recommended); higher values run installs/downloads in parallel and increase the risk of errors.
+Add a game folder, or pick another filter. The real version scans Steam / Epic / GOG libraries automatically.
+Apex Neural Rendering FG Beta, published by Apex Compute
+Currently bypassing to NVIDIA's native DLSS-G, which only works on RTX 40-series GPUs; other GPUs will have no frame generation.
+OptiScaler.ini is missing FGNvngxReplacement, so ANR will not take effect
+Will install OptiScaler and load it as dxgi.dll, backing up the original files.
+Click "Install" on a card. Disk space, runtimes and packers are checked first; you can uninstall and restore with one click at any time.
+Turn on "Frame Generation" in-game. Parameters can be adjusted in the details drawer; restart the game for changes to take effect.
+The official uninstaller deletes the entire OptiScaler directory; a snapshot guarantees a full restore
+Will be added as a plug-in to your existing OptiScaler without overwriting its configuration.
+Install, uninstall and version switching are disabled. Toggles and parameters are written to config and take effect after restarting the game.
+This game has no nr_fg log yet. Run frame generation once in-game, then come back.
+After installing ANR, the latest nr_fg log for each game appears here.
+Rescan local packages and try to fetch the newest fingerprint table, to fix versions shown as "Unknown"
+Continuing will overwrite the existing OptiScaler files in this directory
+Once installed, all parameters can be adjusted here in the same order as the in-game menu, with bilingual labels.
+Import a package from a local zip (official SHA256 checksum still required)
+Adjust OptiScaler parameters in Chinese; restart the game for changes to take effect
+Warn before installing into games with known anti-cheat. No circumvention is provided
+Reset to auto and follow OptiScaler's default
+In third-person driving, the car's rear no longer tears or doubles, and the road under the car no longer flickers.
+If you are unsure of the source, cancel and generate a diagnostic bundle first
+Uninstall restores files based on the install record; an unknown source may not be fully restorable
+A third-party OptiScaler is installed; use the add-on install method
+Steam · Epic · GOG · Manually added
+Checksum filled in from the official SHA256SUMS.txt
+Will restore: OptiScaler.ini (pre-install backup)
+Direct GitHub downloads can be slow on some networks; switch to a mirror to speed things up
+Compressed OptiScaler directory archives generated before each uninstall
+, or open the "GitHub release page" in the top-right corner.
+The dropped folders contain no .exe, or were already added
+Closing only hides the window when minimized to tray; tasks continue running in the background
+Please close the game first — the installer refuses to write to files that are in use
+Will not delete: your existing OptiScaler installation
+ANR is generating the in-between frames; works on any GPU.
+The game is running; install / uninstall / switching are paused
+FGNvngxReplacement has been written
+SHA256 verified — no download needed when installing
+The Issue page is open in your browser; just paste the log
+Downloaded packages are stored here by version and reused across games
+The version used for new installs; follows the latest release if not set explicitly
+The cover will be searched again using the new name; right-click to retry if nothing is found
+Reload (if you changed settings in-game, refresh to sync)
+Could not reach GitHub; the version list is temporarily unavailable
+When a version shows as "Unknown", manually specify which release it belongs to
+There is a problem with the configuration; ANR may not take effect.
+Processes and VC++ runtimes are checked before installing
+addon (existing OptiScaler)
+Restore default appearance and behavior settings without deleting game configuration
+Add-on (reuse existing OptiScaler)
+Dark is the default; light is fully supported, with no degraded styling
+Written to OptiScaler.ini
+Settings, fingerprint table, cover cache and snapshots all live here
+Rescan local packages and try to fetch the newest fingerprint table
+An existing OptiScaler was detected
+e.g. Cyberpunk 2077
+No games in the library have ANR installed yet
+Compact mode narrows the spacing and fits more cards per row
+Disable transitions and popup animations for a snappier feel
+, showing the data from the last successful fetch below.
+Re-fetch the version list from GitHub
+auto (choose automatically based on GPU)
+Configuration problem — ANR is not currently active
+Full (includes OptiScaler)
+Display brightness corresponding to model linear 1.0
+A snapshot is created automatically before uninstall, so you can restore at any time
+Drop the folder containing the game's main executable here
+Switch and roll back ANR FG versions
+Troubleshoot and generate a diagnostic bundle you can attach to an issue
+Manually pick the folder containing the .exe
+Welcome to ANR Studio
+Browser preview does not support picking a local image
+Browser preview does not read the local fingerprint table
+(remote table unavailable; local packages scanned)
+The official package structure has changed — please update this tool
+Generate a diagnostic bundle or snapshot first, then continue
+The old directory was uninstalled; installing into the new one now
+A quick look at the install state on this machine
+Logs + config + system info
+Close ANR Studio?
+Browser preview cannot import local packages
+This directory is inside a Steam library
+Manage the install state of every game in one place
+Generate at most 5 frames per real frame
+ANR is not installed in this game
+Browser preview does not support changing directories
+Remember my choice and don't ask again
+Browser preview does not support fetching covers
+Written to config; takes effect after restarting the game
+Package SHA256 verification
+Open this page directly on next launch
+Unofficial management tool · Desktop
+No games have ANR installed yet
+Clear the default and follow the latest release
+Switched to native DLSS-G
+About ANR and this tool
+Search games, pages or actions…
+Avoid interpolation errors on camera cuts
+Minimized to tray (demo)
+New weights for the frame generation model.
+Open the game and enable frame generation
+Original files restored and verified by hash
+Match string Pattern
+Future installs won't need to download again
+Needs the desktop app
+There is no earlier version to roll back to
+All of them already have ANR installed.
+No game files were modified
+The installation in the old directory was left untouched
+A new cover will be fetched on the next search
+Fetching the latest version…
+Native DLSS-G
+Install state needs confirmation
+Choose a local image as the cover
+Could not fetch the checksum automatically
+Package (.zip)
+full (complete package)
+Verify SHA256
+Now following the latest release
+Log copied to clipboard
+No games installed yet
+Input source Input
+Enable Enable
+SHA256 fingerprint
+No games were added
+Scanning the game library…
+ANR official repository
+Restart the game for changes to take effect
+64 hex characters
+Searching for a new cover…
+No log available to view
+No games scanned yet
+Concurrent tasks
+Page to open on startup
+Current ANR version
+No adjustable items on this page
+No versions available yet
+Drop to add games
+Rescan the game library
+Unofficial management tool
+Search games or actions
+Switch to light theme
+Switch to dark theme
+Generate all diagnostic bundles
+No matching results
+Enable frame generation in-game
+Save and search cover
+Exited (demo)
+Import local package
+Failed to generate diagnostic bundle
+Switched to ANR
+Game directory changed
+No games here yet
+What is ANR
+What this tool does
+Settings restored to defaults
+Package cache directory
+Anti-cheat game warning
+Snapshot before uninstall
+Auto Auto
+(not set explicitly)
+Rescanning…
+Open data directory
+Add game folder
+Diagnostic bundle generated
+Already on the latest version
+Game is running
+Roll back to previous version
+Proxy DLL
+Scene cut protection
+HDR brightness
+Change game directory
+Open game directory
+Copy directory path
+Re-search cover
+Verifying and importing…
+Manually mark version
+Running install script
+Running uninstall script
+Verify file restoration
+Preparing target version
+Backend connection failed
+Failed to read log
+Failed to set cover
+No cover found
+Game name changed
+Fingerprint table refreshed
+(includes remote table)
+Failed to select file
+Restart the game to apply
+Version switch failed
+Failed to change directory
+Failed to delete cover
+No log file yet
+Open log directory
+Configuration problem
+Minimize to tray
+Cover image source
+Open cache directory
+Open snapshots directory
+Reset all settings
+Default install version
+Use Use
+Collapse changelog
+Expand changelog
+Versions & cache
+Switch to light
+Switch to dark
+Path copied
+Directory opened
+Incomplete install
+Max generated frames
+Frame generation implementation
+Uninstall and remove
+Remove from list
+Rename game
+· Not installed
+Install ANR
+Uninstall and migrate
+Verify and import
+Needs add-on install
+Downloading package
+Extracting to cache
+Task canceled
+Configuration repaired
+Cover updated
+Original name restored
+Version marked
+Canceling…
+Game added
+Removed from list
+Cover deleted
+Log copied
+Install into a new game
+Logs & diagnostics
+Verification & fingerprints
+When closing the window
+Off Off
+Cache cleared
+Follow system
+Interface density
+Font size
+Logs & diagnostics
+About this software
+Managed objects
+Game sources
+Data location
+Picture tuning
+Switch theme
+Open settings
+Copy path
+Install method
+Installed at
+Version fingerprint
+Convolution path
+Open directory
+Install information
+Advanced parameters
+Delete cover
+View details
+· Add-on
+Change directory only
+Add game
+Working…
+Saving…
+Adding…
+Operation failed
+Dismiss notification
+Cancel task
+Display name
+Target version
+Pre-checks
+Post-install checks
+Creating snapshot
+Overwriting install
+Fingerprint verification
+Refresh failed
+Demo mode
+Repair failed
+Rename failed
+Delete failed
+Setting failed
+Marking failed
+Import failed
+Confirm and continue
+Add-on install
+Full install
+Install anyway
+Install failed
+Uninstall failed
+Switch failed
+Switch version
+Write failed
+Demo data
+Add failed
+Remove failed
+Search games
+Clear search
+Clear selection
+Log directory
+Loading…
+Reload
+Sample log
+All up to date
+Needs attention
+Needs action
+Recently used
+Rescan
+This machine
+Current version
+Published
+1 serial
+Default location
+Ask every time
+Exit directly
+Follow latest
+Close settings
+Reduce motion
+Local data
+Always on
+Read failed
+Upscaler input
+On On
+Clear default
+Set as default
+Download failed
+Cleanup failed
+Changelog
+Library
+Enabled
+Disabled
+Not installed
+Frame generation
+Old directory
+New directory
+Mark as
+Maximize
+Minimize
+Running
+Needs confirm
+Needs attention
+Updatable
+Canceled
+Completed
+Uninstalled
+Installed
+Not enabled
+Package size
+Cached
+Download source
+Fingerprint table
+Unused
+Interface
+Theme
+Dark
+Light
+Standard
+Compact
+Tools
+About
+Overview
+Versions
+Settings
+Actions
+Pages
+Games
+Close
+Source
+Migrate
+Select
+Add
+Package type
+Restore
+Manual
+Just now
+Unknown
+Smallest
+Smaller
+Medium
+Larger
+Largest
+Uninstall
+Enable
+All
+Select all
+Toggle
+Install
+View
+Update
+Appearance
+Download
+Safety
+General
+Auto
+Direct
+Mirror
+Domestic
+Global
+Motion
+Cache
+Data
+Startup
+Window
+Hide
+Collapse
+Expand

@@ -1,0 +1,102 @@
+1 game
+1 day ago
+2 days ago
+2 behind
+3 days ago
+4 games
+4 days ago
+5 days ago
+ANR DLLs have no version resource, so this tool uses
+ANR DLLs carry no version resource, so the tool looks versions up by the SHA256 fingerprint of the provider DLL. When the fingerprint table has no match, the version shows as "Unknown" — set it once here and every game using the same DLL will be identified.
+Alan Wake 2 · Enabled
+Cyberpunk 2077 · Enabled
+Death Stranding Director's Cut · Enabled
+Elden Ring · Enabled
+FG-V.B13 · Enabled
+FG-V.B18 · Disabled
+FG-V.B18 · Enabled
+When GitHub downloads stall, grab the official zip in a browser and import it here. Imported packages go through the same SHA256 verification as online downloads; a mismatch is rejected, with no skip option.
+Monster Hunter Wilds · Enabled
+SHA256 (required, copy it from the official SHA256SUMS.txt)
+The Last of Us Part II · Disabled
+Install all (
+Downloaded packages are reused across games — no need to download twice
+<EMPTY>
+ games
+ games,
+All 10
+Update all to FG-V.B18
+total
+4 have no ANR yet:
+Write to fingerprint table
+Groups and order mirror the in-game Insert menu; restart the game for changes to take effect. Values are written to OptiScaler.ini in the game folder and backed up before every save.
+Switch language
+Delete cache for FG-V.B12
+Refresh
+Refresh fingerprint table
+Package cache
+Upgrade to FG-V.B18
+ settings are kept automatically. Click the arrow before a version to expand its changelog.
+Cancel
+Only the 5 newest versions, plus downloaded or in-use versions, are listed. Default install version:
+Updatable 2
+Available versions
+Enabled 5
+Copy
+Copy and open Issue
+Fetch official
+The official project asks for the latest nr_fg-*.log and OptiScaler.log
+Import local package
+Expand changelog for FG-V.B12
+Expand changelog for FG-V.B13
+Expand changelog for FG-V.B14
+Expand changelog for FG-V.B15
+Expand changelog for FG-V.B16
+Expand changelog for FG-V.B17
+Expand changelog for FG-V.B18
+Installed 6
+installed
+Installed games ·
+Found
+Get started
+Current: Medium (scales all UI elements)
+Mark version
+Open
+Run
+Set FG-V.B12 as the default version
+Set FG-V.B12 as the default version
+Set FG-V.B13 as the default version
+Set FG-V.B13 as the default version
+Set FG-V.B14 as the default version
+Set FG-V.B14 as the default version
+Set FG-V.B15 as the default version
+Set FG-V.B15 as the default version
+Set FG-V.B16 as the default version
+Set FG-V.B16 as the default version
+Set FG-V.B17 as the default version
+Set FG-V.B17 as the default version
+Set FG-V.B18 as the default version
+Set FG-V.B18 as the default version
+Fingerprint table
+Generate a diagnostic bundle before filing an issue — it includes logs, both ini files and system info
+Change
+Update all outdated games (2)
+Latest
+Disabled 1
+Not installed 4
+This is an unofficial project with no affiliation to Apex Compute. It does not modify game files or write to memory; it only calls the official installer and reads/writes config files.
+Browse
+Clear
+Library total
+Versions & changelog
+Generate diagnostic bundle
+Leave blank and click "Fetch official" to look it up; if it is unavailable you must paste it manually, otherwise the import is refused.
+简体中文
+ to identify which version each game has. Switching re-runs the official installer; your
+Details
+Reset
+Needs attention 2
+Unofficial tool, not affiliated with Apex Compute · calls the official installer only, never modifies game files
+Unofficial tool — calls the official installer only, never modifies game files
+items
+ (current: 
