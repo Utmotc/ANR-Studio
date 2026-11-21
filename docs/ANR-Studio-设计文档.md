@@ -1249,3 +1249,105 @@ Tab 顺序、中文名、英文名都由后端 `Snapshot.tabs` 下发，前端�
 
 - `cargo test --lib`：20/20，新增「快照包含代理 DLL 与 ini 并能完整恢复」「旧快照跨游戏拒绝恢复」两个用例
 - `npx tsc --noEmit` 通过；`vite build` 通过；NSIS 安装包构建通过
+
+---
+
+## 附录 S：0.3.0（任务中心 / 批量操作 / 体检 / 实时运行状态）
+
+这一版补的是「承诺了但没做到」的四件事，外加两处会坏数据的细节。
+
+### S.1 批量操作之前是坏的
+
+`批量安装 / 批量卸载` 用 `selected.forEach(id => install(id))` 并发触发，而确认框只有一个槽位：
+后一个 `askConfirm` 会把前一个顶掉，前面的 Promise 永远不 resolve。结果是「点了批量，只有最后一个真的执行」。
+
+现在的做法：
+
+| 项 | 做法 |
+|---|---|
+| 确认 | `askConfirm` 带队列（`confirmQueue`），依次弹出；批量流程只弹**一次**汇总确认 |
+| 执行 | 顺序 `await`，不并发；后端的任务闸门仍然保证真正的串行 |
+| 结果 | 每个失败项记 `{游戏名, 原因}`，最后给一条「成功 N、失败 M」的 toast，前两条原因展开写 |
+| 跳过项 | 运行中 / 安装状态需确认的游戏直接跳过并计入失败原因，不做「假成功」 |
+| 新增 | 批量**更新到最新**（`switchMany`），替换原来只能一个个点 |
+
+### S.2 任务中心
+
+原来只有右下角 3.2 秒自动消失的浮卡，取消的任务卡还会永久留在界面上且关不掉。现在：
+
+- 任务不再自动删除，进入 `tasks` 列表（上限 40，超出丢最老的已结束任务）；取消态也能移除
+- 新增右侧「任务中心」（顶栏按钮，`Ctrl+Shift+J`）：历史、进度、失败原因（后端把错误放进 `stage`，前端收进 `detail`）、重试、取消、清除记录
+- 浮卡只保留「进行中 + 最近一条结果」，其余折叠成「还有 N 条任务」入口
+- 后端 `emit` 在 `canceled` 状态也会清掉取消标记，避免误取消后续同 id 任务
+
+### S.3 运行状态实时化 + 所有写操作实时复查
+
+之前只有 `install` 会重新查进程，`uninstall` / 开关 / 调参 / 快照恢复都只看上次扫描的 `game.running`。
+应用开着的时候启动游戏，界面还显示「未运行」，于是：卸载会删一半就失败，改 ini 会被 OptiScaler 退出时覆盖。
+
+| 层 | 改动 |
+|---|---|
+| 判定 | `scan::game_running`：进程名匹配 **或** 代理 DLL 被独占（`ERROR_SHARING_VIOLATION` 32 / 33）。只看共享冲突，避免只读目录被误判成「游戏中」 |
+| 后端 | 安装、卸载（含排队后再查一次）、切换版本、帧生成开关、`write_config`、`write_opti_tuning`、`restore_snapshot`、修复，全部实时复查 |
+| 前端 | `get_running_ids` 每 5 秒轮询（页面不可见时跳过），只更新真正变化的 `running` 标记 |
+
+### S.4 安装体检与一键修复
+
+`health_check` 返回问题清单，`repair_install` 返回 `{fixed, remaining, needsReinstall}`：
+
+- 能本地修的：`OptiScaler.ini` 丢失但有 `.anr-bak` → 还原；`FGNvngxReplacement` 不是 ANR → 写回；缺 `Enabled` → 补 `auto`；代理 DLL 丢失且备份哈希校验通过 → 还原
+- 修不了的：provider 目录/`nvngx_dll` 丢失、没有备份，明确返回「需要重新安装」，不假装修好
+- 抽屉里新增「安装体检」区块，可重新检查；修复前同样实时查进程
+
+### S.5 安装脚本不会再挂死
+
+`cmd.output()` + 隐藏窗口 + 继承 stdin：脚本一旦走 `Read-Host`（缺参、异常分支）就永久挂住，界面只有转圈。
+现在：`-NonInteractive` + `stdin(Stdio::null())` + stdout/stderr 独立线程收集 + 120ms 轮询 `try_wait` + 取消与 10 分钟超时都会 `kill` 子进程；错误结构里带 `canceled`，任务卡显示「已取消」而不是「失败」。
+解压另外加了 512 MB 上限（防解压炸弹），快照从「入队时拍」改成「拿到任务名额后拍」，避免拍到别人写到一半的目录。
+
+### S.6 ini 写入的三处修复
+
+| 问题 | 之前 | 现在 |
+|---|---|---|
+| 行内注释 | 整行重写成 `key=value`，`; 说明` 被吃掉 | 只替换 `=` 右边的值，缩进 / 键名 / 行尾注释原样保留 |
+| 重复节 | 目标是文件最后一节且键不存在时，会追加第二个 `[Section]` | 用「节头 → 下一个节头」的区间定位，插到节内最后一个非空行之后 |
+| 编码 | `from_utf8_lossy` 解码后一律写 UTF-8，GBK 注释变问号且不可逆 | 检测到非法 UTF-8 直接拒绝写入，并提示用 UTF-8 另存 |
+
+### S.7 主题「跟随系统」
+
+`theme === 'light' ? 'light' : 'dark'` 让 `system` 恒等于深色。现在 `resolveTheme` 解析系统偏好，并监听 `prefers-color-scheme`，切换系统主题即时生效。
+
+### S.8 性能：重命令离开主线程 + 扫描缓存
+
+非 async 的 Tauri 命令在主线程执行 —— 之前 `scan_library`、开关、调参、改名（含网络抓封面）、`list_releases`（GitHub API）都在主线程，
+拨一个开关就会卡住整个窗口。现在这些命令全部 `#[tauri::command] async` + `spawn_blocking`（通过 `app.state::<AppState>()` 在阻塞线程里拿状态）。
+
+另外两处缓存：
+
+- `scan::find_exe`：`(目录, 目录 mtime)` 命中后不再递归遍历
+- `inspect::sha256_file_cached`：provider DLL 的 SHA256 按 `(大小, mtime)` 缓存——30 MB 的 DLL 之前每改一次配置就重算一次
+
+### S.9 顺带修掉的
+
+- 取消与失败区分：`err_status`，任务卡不再把「已取消」显示成红色失败
+- toast：失败常驻（手动关）、最多 6 条，避免批量安装堆 20 条把界面盖住
+- `Esc` 层级：确认框 → 命令面板 → 任务中心 → 抽屉
+- 启动页可选「画面调校 / 日志诊断」；侧栏那个错挂在「日志诊断」上的任务徽标移到顶栏任务中心按钮
+- 诊断包里的版本号不再硬编码 `0.1.0`；UA 与 GitHub API UA 用 `CARGO_PKG_VERSION`
+- 更新日志翻译改用 `net.rs` 的统一客户端（原来自己建 client，等于绕过系统代理）
+- `tuning::write` 校验节名/键名字符集，堵住「key 带换行 = 往 ini 注入行」
+
+### S.10 验证
+
+- `cargo test --lib`：**37 passed / 0 failed / 1 ignored**（新增 ini 6 个、tuning 2 个、health 3 个）
+- `cargo check --all-targets` 无警告
+- `node tsc --noEmit` 通过；`vite build` 通过（单文件 521 KB）
+- 说明：测试仍写 `std::env::temp_dir()`，在禁止写临时目录的受限环境里会失败（与代码无关，后续换 `tempfile`）
+
+### S.11 还没做的
+
+- 代码签名 / 自动更新 / 崩溃捕获（v0.4）
+- 日志实时跟随与帧数统计（v0.4）
+- 配置导入导出、预设档、收藏/标签/排序（v1.0）
+- 仍不支持 Linux/Proton、nr-record、SR/RR
+- 本版新增文案先手工补进了 `src/i18n/en.json`；下次按工具链重跑 `i18n-collect` 时，记得把新条目同步补到 `scripts/i18n-en.txt`，否则 `i18n-build` 会覆盖掉这批手工条目

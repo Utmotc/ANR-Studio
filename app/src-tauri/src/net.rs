@@ -206,8 +206,15 @@ pub fn client(timeout_secs: u64, ua: &str) -> Result<reqwest::blocking::Client, 
     client_with(timeout_secs, ua, true)
 }
 
-static USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ANR-Studio/0.1";
-pub static API_UA: &str = "ANR-Studio/0.1 (+https://github.com/apex-compute/ANR)";
+pub static USER_AGENT: &str = concat!(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ANR-Studio/",
+    env!("CARGO_PKG_VERSION")
+);
+pub static API_UA: &str = concat!(
+    "ANR-Studio/",
+    env!("CARGO_PKG_VERSION"),
+    " (+https://github.com/apex-compute/ANR)"
+);
 
 /// 抓网页/图片时用的 UA（有些 CDN 会拦非浏览器 UA）
 pub fn web_client(timeout_secs: u64) -> Result<reqwest::blocking::Client, String> {

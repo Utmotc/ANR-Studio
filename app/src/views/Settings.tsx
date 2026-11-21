@@ -351,6 +351,8 @@ export function SettingsDialog() {
                       { value: 'overview', label: '总览' },
                       { value: 'library', label: '游戏库' },
                       { value: 'versions', label: '版本' },
+                      { value: 'tuning', label: '调校' },
+                      { value: 'logs', label: '日志' },
                     ]}
                     value={settings.startupView}
                     onChange={(v) =>

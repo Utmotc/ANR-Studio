@@ -50,7 +50,10 @@ pub fn diag_bundle(data: &Path, game: &Path, name: &str, state_json: &str) -> Re
 
     let mut info = String::new();
     info.push_str(&format!("generated: {}\n", P::now_iso()));
-    info.push_str("tool: ANR Studio 0.1.0 (unofficial)\n");
+    info.push_str(&format!(
+        "tool: ANR Studio {} (unofficial)\n",
+        env!("CARGO_PKG_VERSION")
+    ));
     info.push_str(&format!("os: {} {}\n", std::env::consts::OS, std::env::consts::ARCH));
     info.push_str(&format!("game dir: {}\n", game.display()));
     info.push_str("\n--- detected state ---\n");

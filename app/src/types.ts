@@ -64,6 +64,18 @@ export interface Task {
   status: 'running' | 'done' | 'error' | 'canceled';
   gameId?: string;
   cancellable?: boolean;
+  /** 任务创建时间（毫秒），任务中心按这个排序 */
+  createdAt: number;
+  /** 失败原因 / 安装器原始输出，任务中心展开可读 */
+  detail?: string;
+  /** 失败后可以一键重试 */
+  retry?: () => Promise<void>;
+}
+
+/** 批量操作的汇总结果 */
+export interface BatchResult {
+  ok: number;
+  failed: { name: string; reason: string }[];
 }
 
 export interface Toast {
@@ -71,6 +83,8 @@ export interface Toast {
   kind: 'ok' | 'warn' | 'danger' | 'info';
   title: string;
   desc?: string;
+  /** 失败类提示不自动消失，必须手动关掉 */
+  sticky?: boolean;
 }
 
 export interface ConfirmRequest {
@@ -88,7 +102,7 @@ export interface Settings {
   theme: Theme;
   density: 'cozy' | 'compact';
   fontSize: number;
-  startupView: 'overview' | 'library' | 'versions' | 'logs';
+  startupView: 'overview' | 'library' | 'versions' | 'tuning' | 'logs';
   reduceMotion: boolean;
   closeAction: 'ask' | 'tray' | 'exit';
   coverSource: 'auto' | 'domestic' | 'global';
@@ -130,6 +144,26 @@ export interface PrecheckIssue {
   level: 'block' | 'warn';
   title: string;
   detail: string;
+}
+
+/** 安装体检的单项问题 */
+export interface HealthIssue {
+  code: string;
+  level: 'error' | 'warn';
+  title: string;
+  detail: string;
+  /** true = 本地「一键修复」能处理 */
+  fixable: boolean;
+}
+
+/** 一键修复的结果 */
+export interface RepairReport {
+  /** 已经修好的项，给人看的短句 */
+  fixed: string[];
+  /** 修完还剩什么 */
+  remaining: HealthIssue[];
+  /** 还有必须重装才能解决的问题（provider 丢了之类） */
+  needsReinstall: boolean;
 }
 
 /** 卸载/切换前生成的快照。schema 0 = 旧版只含 OptiScaler 目录。 */

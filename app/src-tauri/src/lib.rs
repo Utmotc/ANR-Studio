@@ -1,6 +1,7 @@
 mod catalog;
 mod covers;
 mod changelog;
+mod health;
 mod ini;
 mod jobs;
 mod net;
@@ -70,6 +71,31 @@ fn task_gate(
     })
 }
 
+/// 把阻塞型命令挪到 blocking 线程池：非 async 的 Tauri 命令跑在主线程上，
+/// 全盘扫描 / 哈希 / 网络 / 写盘都会把窗口一起卡住。
+async fn run_blocking<T, F>(f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    match tauri::async_runtime::spawn_blocking(f).await {
+        Ok(r) => r,
+        Err(e) => Err(format!("任务异常：{e}")),
+    }
+}
+
+/// 所有会改动游戏目录的操作都先实时复查一次进程。
+/// 界面里的 `running` 来自上次扫描，游戏可能在应用开着的时候被启动。
+fn ensure_not_running(game: &Game, action: &str) -> Result<(), String> {
+    if scan::game_running(Path::new(&game.dir), &game.exe) {
+        return Err(format!(
+            "{} 正在运行，请先退出游戏再{action}（安装器会拒绝写入被占用的文件）",
+            game.name
+        ));
+    }
+    Ok(())
+}
+
 /// 5.1：异常态游戏的所有写操作都要人工确认，后端也挡一道
 fn require_confirmation(game: &Game, force: Option<bool>) -> Result<(), String> {
     if let Some(reason) = &game.conflict {
@@ -98,12 +124,18 @@ fn tail_chars(s: &str, max: usize) -> String {
 }
 
 /// 把官方脚本的原始输出附在错误里，供前端「原始输出」区域展示。
+/// 取消的文案统一以「已取消」开头，前端据此把它显示成取消而不是失败。
 fn script_error_text(e: installer::ScriptError) -> String {
+    let head = if e.canceled && !e.message.starts_with("已取消") {
+        format!("已取消：{}", e.message)
+    } else {
+        e.message
+    };
     let raw = tail_chars(e.output.trim(), 12_000);
     if raw.is_empty() {
-        e.message
+        head
     } else {
-        format!("{}\n\n{}\n{}", e.message, OUTPUT_HEADER, raw)
+        format!("{head}\n\n{OUTPUT_HEADER}\n{raw}")
     }
 }
 
@@ -129,6 +161,35 @@ fn failure_ui_text(msg: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// 取消和失败在界面上是两种东西：取消不该弹「失败」红色弹窗。
+fn err_status(msg: &str) -> &'static str {
+    if msg.contains("已取消") {
+        "canceled"
+    } else {
+        "error"
+    }
+}
+
+/// 有快照就回滚，并把结果写进错误文案。
+///
+/// 「游戏正在运行」「用户取消」这两种失败不回滚：前者的文件正被占用，
+/// 回滚只会把目录拆成半成品；后者本来就是用户主动停下的，再动一次盘更吓人。
+fn rollback_if_possible(snap: Option<&Path>, dir: &Path, msg: String) -> (String, bool) {
+    if msg.contains("正在运行") || msg.contains("已取消") {
+        return (msg, false);
+    }
+    match snap {
+        Some(z) => match installer::restore_snapshot(z, dir) {
+            Ok(()) => (format!("{msg}（已自动回滚到操作前的状态）"), true),
+            Err(re) => (
+                format!("{msg}\n自动回滚失败：{re}。可以点「回滚到快照」手动恢复。"),
+                false,
+            ),
+        },
+        None => (msg, false),
+    }
 }
 
 fn emit(
@@ -224,17 +285,23 @@ fn inflight() -> &'static Mutex<std::collections::HashSet<String>> {
 }
 
 #[tauri::command]
-fn scan_library(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<Game>, String> {
-    let games = rescan(state.inner())?;
+async fn scan_library(app: AppHandle) -> Result<Vec<Game>, String> {
+    // 扫描要遍历整库目录 + 读每个已装游戏的 provider 指纹，必须离开主线程
+    let app2 = app.clone();
+    let (games, cover_dir, cover_source, missing) = run_blocking(move || {
+        let st = app2.state::<AppState>();
+        let games = rescan(st.inner())?;
+        let cover_dir = st.data_dir.join("covers");
+        let cover_source = st.settings.lock().unwrap().cover_source.clone();
+        let missing: Vec<(String, String)> = games
+            .iter()
+            .filter(|g| g.cover.is_none())
+            .map(|g| (g.id.clone(), g.name.clone()))
+            .collect();
+        Ok((games, cover_dir, cover_source, missing))
+    })
+    .await?;
     refresh_tray(&app, &games);
-
-    let cover_dir = state.data_dir.join("covers");
-    let cover_source = state.settings.lock().unwrap().cover_source.clone();
-    let missing: Vec<(String, String)> = games
-        .iter()
-        .filter(|g| g.cover.is_none())
-        .map(|g| (g.id.clone(), g.name.clone()))
-        .collect();
 
     if !missing.is_empty() {
         let app2 = app.clone();
@@ -257,6 +324,28 @@ fn scan_library(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<Game>,
     }
 
     Ok(games)
+}
+
+/// 前端每 5 秒问一次：哪些游戏现在正在跑。
+/// 只做一次 tasklist + 每个已装游戏的代理 DLL 占用探测，代价可控。
+#[tauri::command]
+async fn get_running_ids(app: AppHandle) -> Result<Vec<String>, String> {
+    run_blocking(move || {
+        let st = app.state::<AppState>();
+        let games = st.games.lock().unwrap().clone();
+        if games.is_empty() {
+            return Ok(Vec::new());
+        }
+        let names = scan::running_names();
+        let mut out = Vec::new();
+        for g in games {
+            if scan::game_running_with(Path::new(&g.dir), &g.exe, &names) {
+                out.push(g.id);
+            }
+        }
+        Ok(out)
+    })
+    .await
 }
 
 /// 升级后刷新 Windows 图标缓存。安装程序覆盖 exe 后，桌面快捷方式时常仍显示旧图标，
@@ -307,48 +396,51 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output 
 }
 
 #[tauri::command]
-fn set_cover_from_file(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    id: String,
-    path: String,
-) -> Result<Option<String>, String> {
-    ensure_game(state.inner(), &id)?;
-    let bytes = fs::read(&path).map_err(|e| format!("读取图片失败：{e}"))?;
-    if bytes.len() < 512 {
-        return Err("这张图片读不出来，换一张试试".into());
-    }
-    let dir = state.data_dir.join("covers");
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let dest = covers::cover_path(&dir, &id);
-    fs::write(&dest, &bytes).map_err(|e| format!("保存封面失败：{e}"))?;
+async fn set_cover_from_file(app: AppHandle, id: String, path: String) -> Result<Option<String>, String> {
+    run_blocking(move || {
+        let st = app.state::<AppState>();
+        ensure_game(st.inner(), &id)?;
+        let bytes = fs::read(&path).map_err(|e| format!("读取图片失败：{e}"))?;
+        if bytes.len() < 512 {
+            return Err("这张图片读不出来，换一张试试".into());
+        }
+        let dir = st.data_dir.join("covers");
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let dest = covers::cover_path(&dir, &id);
+        fs::write(&dest, &bytes).map_err(|e| format!("保存封面失败：{e}"))?;
 
-    let uri = covers::data_uri(&dest);
-    if let Some(g) = state.games.lock().unwrap().iter_mut().find(|g| g.id == id) {
-        g.cover = uri.clone();
-    }
-    let _ = app.emit("cover", serde_json::json!({ "id": id, "cover": uri }));
-    Ok(uri)
+        let uri = covers::data_uri(&dest);
+        if let Some(g) = st.games.lock().unwrap().iter_mut().find(|g| g.id == id) {
+            g.cover = uri.clone();
+        }
+        let _ = app.emit("cover", serde_json::json!({ "id": id, "cover": uri }));
+        Ok(uri)
+    })
+    .await
 }
 
 #[tauri::command]
-fn remove_game(state: State<'_, AppState>, id: String) -> Result<Vec<Game>, String> {
-    let game = ensure_game(state.inner(), &id)?;
-    let dir = PathBuf::from(&game.dir);
+async fn remove_game(app: AppHandle, id: String) -> Result<Vec<Game>, String> {
+    run_blocking(move || {
+        let st = app.state::<AppState>();
+        let game = ensure_game(st.inner(), &id)?;
+        let dir = PathBuf::from(&game.dir);
 
-    let mut s = state.settings.lock().unwrap().clone();
-    let before = s.manual_games.len();
-    s.manual_games.retain(|p| PathBuf::from(p) != dir);
-    if s.manual_games.len() == before {
-        // 不是手动添加的（从 Steam 等扫描出来的），记到隐藏列表里
-        if !s.hidden_games.iter().any(|h| PathBuf::from(h) == dir) {
-            s.hidden_games.push(game.dir.clone());
+        let mut s = st.settings.lock().unwrap().clone();
+        let before = s.manual_games.len();
+        s.manual_games.retain(|p| PathBuf::from(p) != dir);
+        if s.manual_games.len() == before {
+            // 不是手动添加的（从 Steam 等扫描出来的），记到隐藏列表里
+            if !s.hidden_games.iter().any(|h| PathBuf::from(h) == dir) {
+                s.hidden_games.push(game.dir.clone());
+            }
         }
-    }
-    P::save_settings(&state.data_dir, &s)?;
-    *state.settings.lock().unwrap() = s;
+        P::save_settings(&st.data_dir, &s)?;
+        *st.settings.lock().unwrap() = s;
 
-    rescan(state.inner())
+        rescan(st.inner())
+    })
+    .await
 }
 
 fn dir_has_exe(dir: &Path) -> bool {
@@ -366,62 +458,60 @@ fn dir_has_exe(dir: &Path) -> bool {
 
 #[tauri::command]
 async fn change_game_dir(
-    state: State<'_, AppState>,
+    app: AppHandle,
     id: String,
     path: String,
     migrate: bool,
 ) -> Result<Vec<Game>, String> {
-    let game = ensure_game(state.inner(), &id)?;
-    let old_dir = PathBuf::from(&game.dir);
-    let new_dir = PathBuf::from(path.trim());
+    run_blocking(move || {
+        let st = app.state::<AppState>();
+        let game = ensure_game(st.inner(), &id)?;
+        let old_dir = PathBuf::from(&game.dir);
+        let new_dir = PathBuf::from(path.trim());
 
-    if !new_dir.is_dir() {
-        return Err("这个路径不是文件夹".into());
-    }
-    if new_dir == old_dir {
-        return Err("新目录和原来的一样".into());
-    }
-    if !dir_has_exe(&new_dir) {
-        return Err("这个目录里没有 .exe，请选择游戏主程序所在的文件夹".into());
-    }
+        if !new_dir.is_dir() {
+            return Err("这个路径不是文件夹".into());
+        }
+        if new_dir == old_dir {
+            return Err("新目录和原来的一样".into());
+        }
+        if !dir_has_exe(&new_dir) {
+            return Err("这个目录里没有 .exe，请选择游戏主程序所在的文件夹".into());
+        }
 
-    // 需要迁移时先把旧目录的安装卸掉（会按哈希还原原文件）
-    let old_installed = game.anr.is_some();
-    if migrate && old_installed {
-        let settings = state.settings.lock().unwrap().clone();
-        let data = state.data_dir.clone();
-        let d = old_dir.clone();
-        let name = game.name.clone();
-        tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        // 需要迁移时先把旧目录的安装卸掉（会按哈希还原原文件）
+        let old_installed = game.anr.is_some();
+        if migrate && old_installed {
+            ensure_not_running(&game, "迁移安装")?;
+            let settings = st.settings.lock().unwrap().clone();
             if settings.keep_snapshot {
-                let _ = installer::snapshot(&data, &d, &name);
+                let _ = installer::snapshot(&st.data_dir, &old_dir, &game.name);
             }
-            installer::uninstall(&d)
-        })
-        .await
-        .map_err(|e| format!("卸载旧目录失败：{e}"))??;
-    }
-
-    let mut s = state.settings.lock().unwrap().clone();
-    let path_str = new_dir.to_string_lossy().to_string();
-    let mut replaced = false;
-    for p in s.manual_games.iter_mut() {
-        if PathBuf::from(&*p) == old_dir {
-            *p = path_str.clone();
-            replaced = true;
+            installer::uninstall(&old_dir).map_err(|e| format!("卸载旧目录失败：{e}"))?;
         }
-    }
-    if !replaced {
-        // 扫描到的游戏：旧目录加入隐藏，新目录作为手动添加
-        if !s.hidden_games.iter().any(|h| PathBuf::from(h) == old_dir) {
-            s.hidden_games.push(game.dir.clone());
-        }
-        s.manual_games.push(path_str);
-    }
-    P::save_settings(&state.data_dir, &s)?;
-    *state.settings.lock().unwrap() = s;
 
-    rescan(state.inner())
+        let mut s = st.settings.lock().unwrap().clone();
+        let path_str = new_dir.to_string_lossy().to_string();
+        let mut replaced = false;
+        for p in s.manual_games.iter_mut() {
+            if PathBuf::from(&*p) == old_dir {
+                *p = path_str.clone();
+                replaced = true;
+            }
+        }
+        if !replaced {
+            // 扫描到的游戏：旧目录加入隐藏，新目录作为手动添加
+            if !s.hidden_games.iter().any(|h| PathBuf::from(h) == old_dir) {
+                s.hidden_games.push(game.dir.clone());
+            }
+            s.manual_games.push(path_str);
+        }
+        P::save_settings(&st.data_dir, &s)?;
+        *st.settings.lock().unwrap() = s;
+
+        rescan(st.inner())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -446,89 +536,102 @@ fn proxy_hint(dir: &Path) -> Option<&'static str> {
 }
 
 #[tauri::command]
-fn read_opti_tuning(state: State<'_, AppState>, id: String) -> Result<tuning::Snapshot, String> {
-    let game = ensure_game(state.inner(), &id)?;
-    let mut snap = tuning::read(Path::new(&game.dir))?;
-    snap.running = game.running;
-    Ok(snap)
+async fn read_opti_tuning(app: AppHandle, id: String) -> Result<tuning::Snapshot, String> {
+    run_blocking(move || {
+        let st = app.state::<AppState>();
+        let game = ensure_game(st.inner(), &id)?;
+        let mut snap = tuning::read(Path::new(&game.dir))?;
+        // 实时判定，而不是用上次扫描的结果
+        snap.running = scan::game_running(Path::new(&game.dir), &game.exe);
+        Ok(snap)
+    })
+    .await
 }
 
 #[tauri::command]
-fn write_opti_tuning(
-    state: State<'_, AppState>,
+async fn write_opti_tuning(
+    app: AppHandle,
     id: String,
     section: String,
     key: String,
     value: String,
 ) -> Result<String, String> {
-    let game = ensure_game(state.inner(), &id)?;
-    if game.running {
-        return Err(
-            "游戏正在运行：OptiScaler 退出时会把自己的设置写回 ini，会覆盖这次的修改。先关掉游戏再调。"
-                .into(),
-        );
-    }
-    tuning::write(Path::new(&game.dir), &section, &key, &value)
+    run_blocking(move || {
+        let st = app.state::<AppState>();
+        let game = ensure_game(st.inner(), &id)?;
+        ensure_not_running(&game, "调整参数")?;
+        tuning::write(Path::new(&game.dir), &section, &key, &value)
+    })
+    .await
 }
 
 #[tauri::command]
-fn precheck_install(state: State<'_, AppState>, id: String) -> Result<Vec<precheck::Issue>, String> {
-    let game = ensure_game(state.inner(), &id)?;
-    let warn_anticheat = state.settings.lock().unwrap().warn_anti_cheat;
-    Ok(precheck::run(Path::new(&game.dir), warn_anticheat))
+async fn precheck_install(app: AppHandle, id: String) -> Result<Vec<precheck::Issue>, String> {
+    run_blocking(move || {
+        let st = app.state::<AppState>();
+        let game = ensure_game(st.inner(), &id)?;
+        let warn_anticheat = st.settings.lock().unwrap().warn_anti_cheat;
+        Ok(precheck::run(Path::new(&game.dir), warn_anticheat))
+    })
+    .await
 }
 
 #[tauri::command]
-fn rename_game(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    id: String,
-    name: Option<String>,
-) -> Result<Vec<Game>, String> {
-    ensure_game(state.inner(), &id)?;
+async fn rename_game(app: AppHandle, id: String, name: Option<String>) -> Result<Vec<Game>, String> {
+    // 改名会重抓封面（网络），必须在 blocking 线程里做
+    run_blocking(move || {
+        let st = app.state::<AppState>();
+        ensure_game(st.inner(), &id)?;
 
-    let trimmed = name.unwrap_or_default().trim().to_string();
-    let mut s = state.settings.lock().unwrap().clone();
-    if trimmed.is_empty() {
-        s.renames.remove(&id);
-    } else {
-        s.renames.insert(id.clone(), trimmed);
-    }
-    P::save_settings(&state.data_dir, &s)?;
-    *state.settings.lock().unwrap() = s;
-
-    let games = rescan(state.inner())?;
-
-    // 名字变了，旧封面就不再对应，直接重抓
-    if let Some(game) = games.iter().find(|g| g.id == id).cloned() {
-        let dir = state.data_dir.join("covers");
-        let source = state.settings.lock().unwrap().cover_source.clone();
-        covers::remove(&dir, &id);
-        if let Ok(path) = covers::ensure_cover(&dir, &id, &game.name, &source) {
-            let uri = covers::data_uri(&path);
-            if let Some(g) = state.games.lock().unwrap().iter_mut().find(|g| g.id == id) {
-                g.cover = uri.clone();
-            }
-            let _ = app.emit("cover", serde_json::json!({ "id": id, "cover": uri }));
+        let trimmed = name.unwrap_or_default().trim().to_string();
+        let mut s = st.settings.lock().unwrap().clone();
+        if trimmed.is_empty() {
+            s.renames.remove(&id);
+        } else {
+            s.renames.insert(id.clone(), trimmed);
         }
-    }
+        P::save_settings(&st.data_dir, &s)?;
+        *st.settings.lock().unwrap() = s;
 
-    Ok(state.games.lock().unwrap().clone())
+        let games = rescan(st.inner())?;
+
+        // 名字变了，旧封面就不再对应，直接重抓
+        if let Some(game) = games.iter().find(|g| g.id == id).cloned() {
+            let dir = st.data_dir.join("covers");
+            let source = st.settings.lock().unwrap().cover_source.clone();
+            covers::remove(&dir, &id);
+            if let Ok(path) = covers::ensure_cover(&dir, &id, &game.name, &source) {
+                let uri = covers::data_uri(&path);
+                if let Some(g) = st.games.lock().unwrap().iter_mut().find(|g| g.id == id) {
+                    g.cover = uri.clone();
+                }
+                let _ = app.emit("cover", serde_json::json!({ "id": id, "cover": uri }));
+            }
+        }
+
+        let games = st.games.lock().unwrap().clone();
+        Ok(games)
+    })
+    .await
 }
 
 #[tauri::command]
-fn refresh_cover(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<Option<String>, String> {
-    let game = ensure_game(state.inner(), &id)?;
-    let dir = state.data_dir.join("covers");
-    let source = state.settings.lock().unwrap().cover_source.clone();
-    covers::remove(&dir, &id);
-    let path = covers::ensure_cover(&dir, &id, &game.name, &source)?;
-    let uri = covers::data_uri(&path);
-    if let Some(g) = state.games.lock().unwrap().iter_mut().find(|g| g.id == id) {
-        g.cover = uri.clone();
-    }
-    let _ = app.emit("cover", serde_json::json!({ "id": id, "cover": uri }));
-    Ok(uri)
+async fn refresh_cover(app: AppHandle, id: String) -> Result<Option<String>, String> {
+    run_blocking(move || {
+        let st = app.state::<AppState>();
+        let game = ensure_game(st.inner(), &id)?;
+        let dir = st.data_dir.join("covers");
+        let source = st.settings.lock().unwrap().cover_source.clone();
+        covers::remove(&dir, &id);
+        let path = covers::ensure_cover(&dir, &id, &game.name, &source)?;
+        let uri = covers::data_uri(&path);
+        if let Some(g) = st.games.lock().unwrap().iter_mut().find(|g| g.id == id) {
+            g.cover = uri.clone();
+        }
+        let _ = app.emit("cover", serde_json::json!({ "id": id, "cover": uri }));
+        Ok(uri)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -537,15 +640,19 @@ fn cover_provider() -> String {
 }
 
 #[tauri::command]
-fn delete_version(state: State<'_, AppState>, version: String) -> Result<u64, String> {
-    let cache = PathBuf::from(&state.settings.lock().unwrap().cache_dir);
-    let dir = cache.join(&version);
-    if !dir.exists() {
-        return Err("这个版本没有缓存".into());
-    }
-    let freed = dir_size(&dir);
-    fs::remove_dir_all(&dir).map_err(|e| format!("删除缓存失败：{e}"))?;
-    Ok(freed)
+async fn delete_version(app: AppHandle, version: String) -> Result<u64, String> {
+    run_blocking(move || {
+        let st = app.state::<AppState>();
+        let cache = PathBuf::from(&st.settings.lock().unwrap().cache_dir);
+        let dir = cache.join(&version);
+        if !dir.exists() {
+            return Err("这个版本没有缓存".into());
+        }
+        let freed = dir_size(&dir);
+        fs::remove_dir_all(&dir).map_err(|e| format!("删除缓存失败：{e}"))?;
+        Ok(freed)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -561,21 +668,25 @@ fn set_settings(state: State<'_, AppState>, settings: Settings) -> Result<(), St
 }
 
 #[tauri::command]
-fn add_manual_game(state: State<'_, AppState>, path: String) -> Result<Option<String>, String> {
-    let dir = PathBuf::from(&path);
-    if !dir.is_dir() {
-        return Err("这个路径不是一个文件夹".into());
-    }
-    if scan::find_exe(&dir, None).is_none() {
-        return Err("这个文件夹里没有找到 .exe，请选择游戏主程序所在的文件夹".into());
-    }
-    let mut s = state.settings.lock().unwrap().clone();
-    if !s.manual_games.iter().any(|p| p.eq_ignore_ascii_case(&path)) {
-        s.manual_games.push(path);
-        P::save_settings(&state.data_dir, &s)?;
-        *state.settings.lock().unwrap() = s;
-    }
-    Ok(precheck::steamapps_warning(&dir))
+async fn add_manual_game(app: AppHandle, path: String) -> Result<Option<String>, String> {
+    run_blocking(move || {
+        let st = app.state::<AppState>();
+        let dir = PathBuf::from(&path);
+        if !dir.is_dir() {
+            return Err("这个路径不是一个文件夹".into());
+        }
+        if scan::find_exe(&dir, None).is_none() {
+            return Err("这个文件夹里没有找到 .exe，请选择游戏主程序所在的文件夹".into());
+        }
+        let mut s = st.settings.lock().unwrap().clone();
+        if !s.manual_games.iter().any(|p| p.eq_ignore_ascii_case(&path)) {
+            s.manual_games.push(path);
+            P::save_settings(&st.data_dir, &s)?;
+            *st.settings.lock().unwrap() = s;
+        }
+        Ok(precheck::steamapps_warning(&dir))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -608,20 +719,25 @@ async fn get_changelog(
 }
 
 #[tauri::command]
-fn list_releases(state: State<'_, AppState>, refresh: Option<bool>) -> Result<Vec<Version>, String> {
-    let rels = get_releases(state.inner(), refresh.unwrap_or(false))?;
-    let cache = PathBuf::from(&state.settings.lock().unwrap().cache_dir);
-    let catalog = state.catalog.lock().unwrap().clone();
-    // 游戏里正在用的旧版本也要留在列表里，否则清掉缓存后就看不见、也回不去了
-    let installed: Vec<String> = state
-        .games
-        .lock()
-        .unwrap()
-        .iter()
-        .filter_map(|g| g.anr.as_ref().map(|a| a.version.clone()))
-        .filter(|v| v != "未知" && !v.is_empty())
-        .collect();
-    Ok(releases::to_versions(&rels, &cache, &catalog, &installed))
+async fn list_releases(app: AppHandle, refresh: Option<bool>) -> Result<Vec<Version>, String> {
+    // 这里可能真的要联网（refresh 或缓存过期），不能留在主线程
+    run_blocking(move || {
+        let st = app.state::<AppState>();
+        let rels = get_releases(st.inner(), refresh.unwrap_or(false))?;
+        let cache = PathBuf::from(&st.settings.lock().unwrap().cache_dir);
+        let catalog = st.catalog.lock().unwrap().clone();
+        // 游戏里正在用的旧版本也要留在列表里，否则清掉缓存后就看不见、也回不去了
+        let installed: Vec<String> = st
+            .games
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|g| g.anr.as_ref().map(|a| a.version.clone()))
+            .filter(|v| v != "未知" && !v.is_empty())
+            .collect();
+        Ok(releases::to_versions(&rels, &cache, &catalog, &installed))
+    })
+    .await
 }
 
 fn record_fingerprint(state: &AppState, pkg: &Path, tag: &str) {
@@ -654,12 +770,12 @@ fn do_install(
         return Err("游戏目录不存在".into());
     }
     let exe = scan::find_exe(dir, None).ok_or("这个目录里没有找到 .exe")?;
-    let procs = scan::running_names();
     let exe_name = exe
         .file_name()
-        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-    if procs.contains(&exe_name) {
+    // 实时复查：进程名 + 代理 DLL 占用
+    if scan::game_running(dir, &exe_name) {
         return Err(format!("游戏正在运行（{exe_name}），请先关闭游戏"));
     }
     let opti = inspect::opti_dir(dir);
@@ -680,11 +796,9 @@ fn do_install(
         return Err("已取消".into());
     }
 
-    if canceled(task) {
-        return Err("已取消".into());
-    }
     emit(app, task, "安装", name, "执行安装脚本", 0.9, "running");
-    installer::run_install(&pkg, dir, proxy_hint(dir)).map_err(script_error_text)?;
+    installer::run_install(&pkg, dir, proxy_hint(dir), &|| canceled(task))
+        .map_err(script_error_text)?;
 
     emit(app, task, "安装", name, "后置校验", 0.97, "running");
     if !inspect::provider_dll(dir).exists() {
@@ -705,6 +819,7 @@ async fn install(
 ) -> Result<(), String> {
     let game = ensure_game(state.inner(), &id)?;
     require_confirmation(&game, force)?;
+    ensure_not_running(&game, "安装")?;
     let settings = state.settings.lock().unwrap().clone();
     let kind = if game.third_party_optiscaler { "addon" } else { "full" }.to_string();
 
@@ -732,25 +847,39 @@ async fn install(
     let app2 = app.clone();
     let task2 = task.clone();
     let name2 = name.clone();
-
     let had_install = game.anr.is_some();
-    let snap = if had_install && settings.keep_snapshot {
-        installer::snapshot(&state.data_dir, &dir, &name).ok()
-    } else {
-        None
-    };
-    let dir_keep = dir.clone();
+    let keep_snapshot = settings.keep_snapshot;
     let limit = settings.concurrency;
+    let data_dir = state.data_dir.clone();
 
-    let result = tauri::async_runtime::spawn_blocking(move || {
+    let result = run_blocking(move || -> Result<PathBuf, String> {
         let _ticket = task_gate(&app2, &task2, "安装", &name2, limit)?;
-        do_install(
+        // 快照之前先确认游戏没在跑（拿到名额后可能又被启动）
+        let exe = scan::find_exe(&dir, None)
+            .map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())
+            .unwrap_or_default();
+        if scan::game_running(&dir, &exe) {
+            return Err(format!("游戏正在运行（{exe}），请先关闭游戏"));
+        }
+        // 快照放在任务闸门之内：队列里等待的任务不会拍到别人写到一半的目录
+        let snap: Option<PathBuf> = if had_install && keep_snapshot {
+            emit(&app2, &task2, "安装", &name2, "生成快照", 0.1, "running");
+            installer::snapshot(&data_dir, &dir, &name2).ok()
+        } else {
+            None
+        };
+        match do_install(
             &app2, &task2, &name2, &dir, &cache, &kind, &target, &mirror,
             force.unwrap_or(false),
-        )
+        ) {
+            Ok(pkg) => Ok(pkg),
+            Err(e) => {
+                let (msg, rolled) = rollback_if_possible(snap.as_deref(), &dir, e);
+                Err(failure_message(msg, snap.as_deref(), rolled))
+            }
+        }
     })
-    .await
-    .map_err(|e| format!("任务异常：{e}"))?;
+    .await;
 
     match result {
         Ok(path) => {
@@ -758,23 +887,9 @@ async fn install(
             let _ = rescan(state.inner());
             Ok(())
         }
-        Err(e) => {
-            let mut msg = e;
-            let mut rolled_back = false;
-            if let Some(z) = &snap {
-                match installer::restore_snapshot(z, &dir_keep) {
-                    Ok(()) => {
-                        rolled_back = true;
-                        msg = format!("{msg}（已自动回滚到安装前的状态）");
-                        let _ = rescan(state.inner());
-                    }
-                    Err(re) => {
-                        msg = format!("{msg}\n自动回滚失败：{re}。可以点「回滚到快照」手动恢复。")
-                    }
-                }
-            }
-            let full = failure_message(msg, snap.as_deref(), rolled_back);
-            emit(&app, &task, "安装", &name, &failure_ui_text(&full), 1.0, "error");
+        Err(full) => {
+            let _ = rescan(state.inner());
+            emit(&app, &task, "安装", &name, &failure_ui_text(&full), 1.0, err_status(&full));
             Err(full)
         }
     }
@@ -792,9 +907,12 @@ async fn uninstall(
         return Err("这个游戏没有安装 ANR".into());
     }
     require_confirmation(&game, force)?;
+    // 卸载会删目录里的文件：正在运行的游戏必须硬拦，否则只会留下半套文件
+    ensure_not_running(&game, "卸载")?;
     let settings = state.settings.lock().unwrap().clone();
     let data = state.data_dir.clone();
     let dir = PathBuf::from(&game.dir);
+    let exe = game.exe.clone();
     let name = game.name.clone();
     let task = format!("task-{}", TASK_SEQ.fetch_add(1, Ordering::Relaxed));
     let app2 = app.clone();
@@ -802,8 +920,12 @@ async fn uninstall(
     let name2 = name.clone();
     let limit = settings.concurrency;
 
-    let result = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+    let result = run_blocking(move || -> Result<(), String> {
         let _ticket = task_gate(&app2, &task2, "卸载", &name2, limit)?;
+        // 排队期间游戏可能被启动：拿到名额后再查一次
+        if scan::game_running(&dir, &exe) {
+            return Err(format!("{name2} 正在运行，请先退出游戏再卸载"));
+        }
         if settings.keep_snapshot {
             emit(&app2, &task2, "卸载", &name2, "生成快照", 0.2, "running");
             installer::snapshot(&data, &dir, &name2)?;
@@ -813,8 +935,7 @@ async fn uninstall(
         emit(&app2, &task2, "卸载", &name2, "校验还原", 1.0, "done");
         Ok(())
     })
-    .await
-    .map_err(|e| format!("任务异常：{e}"))?;
+    .await;
 
     match result {
         Ok(()) => {
@@ -822,7 +943,8 @@ async fn uninstall(
             Ok(())
         }
         Err(e) => {
-            emit(&app, &task, "卸载", &name, &e, 1.0, "error");
+            let _ = rescan(state.inner());
+            emit(&app, &task, "卸载", &name, &e, 1.0, err_status(&e));
             Err(e)
         }
     }
@@ -845,25 +967,36 @@ async fn switch_version(
     let cache = PathBuf::from(&settings.cache_dir);
     let mirror = settings.mirror.clone();
     let dir = PathBuf::from(&game.dir);
+    let exe = game.exe.clone();
     let name = game.name.clone();
     let kind = anr.kind.clone();
     let tag2 = tag.clone();
     let task = format!("task-{}", TASK_SEQ.fetch_add(1, Ordering::Relaxed));
-
-    // 覆盖安装前先留一份快照，失败时能回到切换前的状态
-    let snap = if settings.keep_snapshot {
-        installer::snapshot(&state.data_dir, &dir, &name).ok()
-    } else {
-        None
-    };
+    let data_dir = state.data_dir.clone();
+    let keep_snapshot = settings.keep_snapshot;
     let dir2 = dir.clone();
     let task3 = task.clone();
     let name3 = name.clone();
     let app3 = app.clone();
     let limit = settings.concurrency;
 
-    let result = tauri::async_runtime::spawn_blocking(move || -> Result<PathBuf, String> {
+    let result = run_blocking(move || -> Result<PathBuf, String> {
         let _ticket = task_gate(&app3, &task3, "切换版本", &name3, limit)?;
+        // 覆盖安装前先确认游戏没在跑：在跑的话连快照都不该打（目录正被占用）
+        if scan::game_running(&dir2, &exe) {
+            return Err("游戏正在运行，请先退出游戏再切换版本".into());
+        }
+        // 覆盖安装前先留一份快照，失败时能回到切换前的状态
+        let snap: Option<PathBuf> = if keep_snapshot {
+            emit(&app3, &task3, "切换版本", &name3, "生成快照", 0.05, "running");
+            installer::snapshot(&data_dir, &dir2, &name3).ok()
+        } else {
+            None
+        };
+        let fail = |msg: String| -> String {
+            let (msg, rolled) = rollback_if_possible(snap.as_deref(), &dir2, msg);
+            failure_message(msg, snap.as_deref(), rolled)
+        };
         emit(&app3, &task3, "切换版本", &name3, "准备目标版本", 0.1, "running");
         let pkg = installer::ensure_package(
             &cache,
@@ -872,17 +1005,18 @@ async fn switch_version(
             &mirror,
             |stage, p| emit(&app3, &task3, "切换版本", &name3, stage, 0.1 + p * 0.7, "running"),
             &|| canceled(&task3),
-        )?;
+        )
+        .map_err(|e| fail(e))?;
         if canceled(&task3) {
             return Err("已取消".into());
         }
         emit(&app3, &task3, "切换版本", &name3, "覆盖安装", 0.9, "running");
-        installer::run_install(&pkg, &dir2, proxy_hint(&dir2)).map_err(script_error_text)?;
+        installer::run_install(&pkg, &dir2, proxy_hint(&dir2), &|| canceled(&task3))
+            .map_err(|e| fail(script_error_text(e)))?;
         emit(&app3, &task3, "切换版本", &name3, "指纹校验", 1.0, "done");
         Ok(pkg)
     })
-    .await
-    .map_err(|e| format!("任务异常：{e}"))?;
+    .await;
 
     match result {
         Ok(path) => {
@@ -890,136 +1024,184 @@ async fn switch_version(
             let _ = rescan(state.inner());
             Ok(())
         }
-        Err(e) => {
-            let mut msg = e;
-            let mut rolled_back = false;
-            if let Some(z) = &snap {
-                match installer::restore_snapshot(z, &dir) {
-                    Ok(()) => {
-                        rolled_back = true;
-                        msg = format!("{msg}（已自动回滚到切换前的状态）");
-                        let _ = rescan(state.inner());
-                    }
-                    Err(re) => {
-                        msg = format!("{msg}\n自动回滚失败：{re}。可以点「回滚到快照」手动恢复。")
-                    }
-                }
-            }
-            let full = failure_message(msg, snap.as_deref(), rolled_back);
-            emit(&app, &task, "切换版本", &name, &failure_ui_text(&full), 1.0, "error");
+        Err(full) => {
+            let _ = rescan(state.inner());
+            emit(
+                &app,
+                &task,
+                "切换版本",
+                &name,
+                &failure_ui_text(&full),
+                1.0,
+                err_status(&full),
+            );
             Err(full)
         }
     }
 }
 
 #[tauri::command]
-fn set_fg_enabled(
-    state: State<'_, AppState>,
+async fn set_fg_enabled(
+    app: AppHandle,
     id: String,
     enabled: bool,
     force: Option<bool>,
 ) -> Result<(), String> {
-    let game = ensure_game(state.inner(), &id)?;
-    require_confirmation(&game, force)?;
-    let dir = PathBuf::from(&game.dir);
-    let ini_p = inspect::ini_path(&dir);
-    if !ini_p.exists() {
-        return Err("这个目录没有 OptiScaler.ini，无法写入开关".into());
-    }
-    let mut doc = IniDoc::load(&ini_p);
-    IniDoc::backup_once(&ini_p);
-    doc.set("FrameGen", "Enabled", if enabled { "true" } else { "false" });
-    doc.save(&ini_p).map_err(|e| format!("写入 OptiScaler.ini 失败：{e}"))?;
-    let _ = rescan(state.inner());
-    Ok(())
+    run_blocking(move || {
+        let st = app.state::<AppState>();
+        let game = ensure_game(st.inner(), &id)?;
+        require_confirmation(&game, force)?;
+        // 和调参页一样：OptiScaler 退出时会把内存里的设置写回 ini，
+        // 游戏运行时改开关只会被覆盖，不如直接拒绝。
+        ensure_not_running(&game, "改帧生成开关")?;
+        let dir = PathBuf::from(&game.dir);
+        let ini_p = inspect::ini_path(&dir);
+        if !ini_p.exists() {
+            return Err("这个目录没有 OptiScaler.ini，无法写入开关".into());
+        }
+        let mut doc = IniDoc::load(&ini_p);
+        if doc.is_lossy() {
+            return Err("OptiScaler.ini 不是 UTF-8 编码，为免写坏注释已拒绝写入".into());
+        }
+        IniDoc::backup_once(&ini_p);
+        doc.set("FrameGen", "Enabled", if enabled { "true" } else { "false" });
+        doc.save(&ini_p)
+            .map_err(|e| format!("写入 OptiScaler.ini 失败：{e}"))?;
+        let _ = rescan(st.inner());
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]
-fn write_config(state: State<'_, AppState>, id: String, config: NrFgConfig) -> Result<(), String> {
-    let game = ensure_game(state.inner(), &id)?;
-    let dir = PathBuf::from(&game.dir);
-    let ini_p = inspect::nrf_g_ini(&dir);
-    if !ini_p.exists() {
-        return Err("找不到 nr_fg.ini".into());
-    }
-    let mut doc = IniDoc::load(&ini_p);
-    IniDoc::backup_once(&ini_p);
-    doc.set_flat("path", &config.path);
-    doc.set_flat("model_size", &config.model_size);
-    doc.set_flat("nits_per_unit", &config.nits.to_string());
-    doc.set_flat("max_generated", &config.max_generated.to_string());
-    doc.set_flat("scene_cut", if config.scene_cut { "1" } else { "0" });
-    doc.save(&ini_p).map_err(|e| format!("写入 OptiScaler.ini 失败：{e}"))?;
-    let _ = rescan(state.inner());
-    Ok(())
+async fn write_config(
+    app: AppHandle,
+    id: String,
+    config: NrFgConfig,
+) -> Result<(), String> {
+    run_blocking(move || {
+        let st = app.state::<AppState>();
+        let game = ensure_game(st.inner(), &id)?;
+        ensure_not_running(&game, "改参数")?;
+        let dir = PathBuf::from(&game.dir);
+        let ini_p = inspect::nrf_g_ini(&dir);
+        if !ini_p.exists() {
+            return Err("找不到 nr_fg.ini".into());
+        }
+        let mut doc = IniDoc::load(&ini_p);
+        if doc.is_lossy() {
+            return Err("nr_fg.ini 不是 UTF-8 编码，为免写坏注释已拒绝写入".into());
+        }
+        IniDoc::backup_once(&ini_p);
+        doc.set_flat("path", &config.path);
+        doc.set_flat("model_size", &config.model_size);
+        doc.set_flat("nits_per_unit", &config.nits.to_string());
+        doc.set_flat("max_generated", &config.max_generated.to_string());
+        doc.set_flat("scene_cut", if config.scene_cut { "1" } else { "0" });
+        doc.save(&ini_p)
+            .map_err(|e| format!("写入 nr_fg.ini 失败：{e}"))?;
+        let _ = rescan(st.inner());
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]
-fn set_fg_replacement(
-    state: State<'_, AppState>,
+async fn set_fg_replacement(
+    app: AppHandle,
     id: String,
     mode: String,
     force: Option<bool>,
 ) -> Result<(), String> {
-    let game = ensure_game(state.inner(), &id)?;
-    require_confirmation(&game, force)?;
-    let dir = PathBuf::from(&game.dir);
-    let ini_p = inspect::ini_path(&dir);
-    if !ini_p.exists() {
-        return Err("找不到 OptiScaler.ini".into());
-    }
-    let value = match mode.as_str() {
-        "anr" => "Apex Neural Rendering FG",
-        "native" => "None",
-        // Q1 三态：留一个「跟随 OptiScaler 自己判断」的选项
-        "auto" => "auto",
-        _ => return Err("未知的帧生成实现".into()),
-    };
-    let mut doc = IniDoc::load(&ini_p);
-    IniDoc::backup_once(&ini_p);
-    doc.set("FrameGen", "FGNvngxReplacement", value);
-    doc.save(&ini_p)
-        .map_err(|e| format!("写入 OptiScaler.ini 失败：{e}"))?;
-    let _ = rescan(state.inner());
-    Ok(())
+    run_blocking(move || {
+        let st = app.state::<AppState>();
+        let game = ensure_game(st.inner(), &id)?;
+        require_confirmation(&game, force)?;
+        ensure_not_running(&game, "切换帧生成实现")?;
+        let dir = PathBuf::from(&game.dir);
+        let ini_p = inspect::ini_path(&dir);
+        if !ini_p.exists() {
+            return Err("找不到 OptiScaler.ini".into());
+        }
+        let value = match mode.as_str() {
+            "anr" => "Apex Neural Rendering FG",
+            "native" => "None",
+            // Q1 三态：留一个「跟随 OptiScaler 自己判断」的选项
+            "auto" => "auto",
+            _ => return Err("未知的帧生成实现".into()),
+        };
+        let mut doc = IniDoc::load(&ini_p);
+        if doc.is_lossy() {
+            return Err("OptiScaler.ini 不是 UTF-8 编码，为免写坏注释已拒绝写入".into());
+        }
+        IniDoc::backup_once(&ini_p);
+        doc.set("FrameGen", "FGNvngxReplacement", value);
+        doc.save(&ini_p)
+            .map_err(|e| format!("写入 OptiScaler.ini 失败：{e}"))?;
+        let _ = rescan(st.inner());
+        Ok(())
+    })
+    .await
+}
+
+/// 安装体检：返回这个游戏当前所有的配置/文件问题（供抽屉里的「体检」区块展示）
+#[tauri::command]
+async fn health_check(app: AppHandle, id: String) -> Result<Vec<health::Issue>, String> {
+    run_blocking(move || {
+        let st = app.state::<AppState>();
+        let game = ensure_game(st.inner(), &id)?;
+        Ok(health::check(Path::new(&game.dir)))
+    })
+    .await
+}
+
+/// 一键修复：补写 ini 关键项、从备份还原代理 DLL / OptiScaler.ini。
+/// 修不了的（provider 整个丢了）会通过 `needsReinstall` 告诉前端去重装。
+#[tauri::command]
+async fn repair_install(app: AppHandle, id: String) -> Result<health::RepairReport, String> {
+    run_blocking(move || {
+        let st = app.state::<AppState>();
+        let game = ensure_game(st.inner(), &id)?;
+        ensure_not_running(&game, "修复安装")?;
+        let dir = PathBuf::from(&game.dir);
+        let report = health::repair(&dir);
+        let _ = rescan(st.inner());
+        Ok(report)
+    })
+    .await
 }
 
 #[tauri::command]
-fn repair_install(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    let game = ensure_game(state.inner(), &id)?;
-    let dir = PathBuf::from(&game.dir);
-    let ini_p = inspect::ini_path(&dir);
-    if !ini_p.exists() {
-        return Err("这个目录没有 OptiScaler.ini，无法修复".into());
-    }
-    let mut doc = IniDoc::load(&ini_p);
-    IniDoc::backup_once(&ini_p);
-    doc.set("FrameGen", "FGInput", "nvngxfg");
-    doc.set("FrameGen", "FGNvngxReplacement", inspect::PROVIDER);
-    doc.save(&ini_p).map_err(|e| format!("写入 OptiScaler.ini 失败：{e}"))?;
-    let _ = rescan(state.inner());
-    Ok(())
+async fn get_log(app: AppHandle, id: String) -> Result<String, String> {
+    run_blocking(move || {
+        let st = app.state::<AppState>();
+        let game = ensure_game(st.inner(), &id)?;
+        logs::read_log(Path::new(&game.dir), 400)
+    })
+    .await
 }
 
 #[tauri::command]
-fn get_log(state: State<'_, AppState>, id: String) -> Result<String, String> {
-    let game = ensure_game(state.inner(), &id)?;
-    logs::read_log(Path::new(&game.dir), 400)
-}
-
-#[tauri::command]
-fn make_diag(state: State<'_, AppState>, id: String) -> Result<String, String> {
-    let game = ensure_game(state.inner(), &id)?;
-    let json = serde_json::to_string_pretty(&game).unwrap_or_default();
-    let out = logs::diag_bundle(&state.data_dir, Path::new(&game.dir), &game.name, &json)?;
-    Ok(out.to_string_lossy().to_string())
+async fn make_diag(app: AppHandle, id: String) -> Result<String, String> {
+    run_blocking(move || {
+        let st = app.state::<AppState>();
+        let game = ensure_game(st.inner(), &id)?;
+        let json = serde_json::to_string_pretty(&game).unwrap_or_default();
+        let out = logs::diag_bundle(&st.data_dir, Path::new(&game.dir), &game.name, &json)?;
+        Ok(out.to_string_lossy().to_string())
+    })
+    .await
 }
 
 /// P0-1：列出这个游戏的快照（新快照按 gameId 匹配，旧快照按文件名前缀兜底）
 #[tauri::command]
-fn list_snapshots(state: State<'_, AppState>, id: String) -> Result<Vec<SnapshotInfo>, String> {
-    let game = ensure_game(state.inner(), &id)?;
-    installer::list_snapshots(&state.data_dir, &game.id, &game.name)
+async fn list_snapshots(app: AppHandle, id: String) -> Result<Vec<SnapshotInfo>, String> {
+    run_blocking(move || {
+        let st = app.state::<AppState>();
+        let game = ensure_game(st.inner(), &id)?;
+        installer::list_snapshots(&st.data_dir, &game.id, &game.name)
+    })
+    .await
 }
 
 /// P0-1：把指定快照恢复回游戏目录，恢复代理 DLL / OptiScaler.ini / OptiScaler 目录
@@ -1031,7 +1213,8 @@ async fn restore_snapshot(
     path: String,
 ) -> Result<Vec<Game>, String> {
     let game = ensure_game(state.inner(), &id)?;
-    if game.running {
+    // 实时复查（缓存里的 running 可能已经过期）
+    if scan::game_running(Path::new(&game.dir), &game.exe) {
         return Err("游戏正在运行，请先退出游戏再恢复快照".into());
     }
 
@@ -1047,9 +1230,14 @@ async fn restore_snapshot(
     installer::validate_snapshot_for_game(&snap_canon, &game.id, &game.name)?;
 
     let dir = PathBuf::from(&game.dir);
-    tauri::async_runtime::spawn_blocking(move || installer::restore_snapshot(&snap_canon, &dir))
-        .await
-        .map_err(|e| format!("恢复任务异常：{e}"))??;
+    let exe = game.exe.clone();
+    run_blocking(move || {
+        if scan::game_running(&dir, &exe) {
+            return Err("游戏正在运行，请先退出游戏再恢复快照".into());
+        }
+        installer::restore_snapshot(&snap_canon, &dir)
+    })
+    .await?;
 
     let games = rescan(state.inner())?;
     refresh_tray(&app, &games);
@@ -1116,21 +1304,25 @@ fn set_default_version(
 }
 
 #[tauri::command]
-fn mark_version(state: State<'_, AppState>, id: String, tag: String) -> Result<Vec<Game>, String> {
-    let game = ensure_game(state.inner(), &id)?;
-    let dll = inspect::provider_dll(Path::new(&game.dir));
-    let sha = inspect::sha256_file(&dll)
-        .ok_or("这个游戏没有找到 provider DLL，无法标记版本")?;
-    let clean = tag.trim();
-    if clean.is_empty() {
-        return Err("请选择要标记的版本".into());
-    }
-    {
-        let mut cat = state.catalog.lock().unwrap();
-        cat.insert(sha, clean.to_string());
-        P::save_catalog(&state.data_dir, &cat)?;
-    }
-    rescan(state.inner())
+async fn mark_version(app: AppHandle, id: String, tag: String) -> Result<Vec<Game>, String> {
+    run_blocking(move || {
+        let st = app.state::<AppState>();
+        let game = ensure_game(st.inner(), &id)?;
+        let dll = inspect::provider_dll(Path::new(&game.dir));
+        let sha = inspect::sha256_file_cached(&dll)
+            .ok_or("这个游戏没有找到 provider DLL，无法标记版本")?;
+        let clean = tag.trim();
+        if clean.is_empty() {
+            return Err("请选择要标记的版本".into());
+        }
+        {
+            let mut cat = st.catalog.lock().unwrap();
+            cat.insert(sha, clean.to_string());
+            P::save_catalog(&st.data_dir, &cat)?;
+        }
+        rescan(st.inner())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1151,9 +1343,18 @@ async fn refresh_catalog(state: State<'_, AppState>) -> Result<catalog::RefreshR
 }
 
 #[tauri::command]
-fn check_package_structure(state: State<'_, AppState>) -> Vec<String> {
-    let cache = PathBuf::from(&state.settings.lock().unwrap().cache_dir);
-    installer::check_cached_packages(&cache)
+async fn check_package_structure(app: AppHandle) -> Vec<String> {
+    let handle = app.clone();
+    match run_blocking(move || {
+        let st = handle.state::<AppState>();
+        let cache = PathBuf::from(&st.settings.lock().unwrap().cache_dir);
+        Ok(installer::check_cached_packages(&cache))
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(_) => Vec::new(),
+    }
 }
 
 #[tauri::command]
@@ -1242,15 +1443,19 @@ fn dir_size(p: &Path) -> u64 {
 }
 
 #[tauri::command]
-fn clear_cache(state: State<'_, AppState>) -> Result<u64, String> {
-    let cache = PathBuf::from(&state.settings.lock().unwrap().cache_dir);
-    if !cache.exists() {
-        return Ok(0);
-    }
-    let freed = dir_size(&cache);
-    fs::remove_dir_all(&cache).map_err(|e| format!("清理缓存失败：{e}"))?;
-    let _ = fs::create_dir_all(&cache);
-    Ok(freed)
+async fn clear_cache(app: AppHandle) -> Result<u64, String> {
+    run_blocking(move || {
+        let st = app.state::<AppState>();
+        let cache = PathBuf::from(&st.settings.lock().unwrap().cache_dir);
+        if !cache.exists() {
+            return Ok(0);
+        }
+        let freed = dir_size(&cache);
+        fs::remove_dir_all(&cache).map_err(|e| format!("清理缓存失败：{e}"))?;
+        let _ = fs::create_dir_all(&cache);
+        Ok(freed)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1453,6 +1658,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             scan_library,
+            get_running_ids,
+            health_check,
             get_settings,
             set_settings,
             add_manual_game,

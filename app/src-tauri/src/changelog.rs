@@ -164,11 +164,9 @@ fn cache_path(data: &Path, tag: &str) -> PathBuf {
 }
 
 fn client() -> Result<reqwest::blocking::Client, String> {
-    reqwest::blocking::Client::builder()
-        .user_agent("ANR-Studio/0.1 (+https://github.com/apex-compute/ANR)")
-        .timeout(Duration::from_secs(12))
-        .build()
-        .map_err(|e| e.to_string())
+    // 走统一的网络入口：这里原来自己建 client，等于绕过了系统代理，
+    // 开着 Clash 的用户会一直卡在「翻译失败」。
+    crate::net::api_client(12)
 }
 
 /// 按句子切块，控制单次请求体积

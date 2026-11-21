@@ -4,6 +4,7 @@ import {
   FileText,
   LayoutDashboard,
   Library,
+  ListChecks,
   Moon,
   Search,
   Settings as SettingsIcon,
@@ -27,8 +28,7 @@ const NAV: { view: View; label: string; icon: typeof Library }[] = [
 
 
 export function Sidebar() {
-  const { view, setView, games, tasks, versions, connected, setSettingsOpen } = useApp();
-  const running = tasks.filter((t) => t.status === 'running').length;
+  const { view, setView, setSettingsOpen } = useApp();
 
   return (
     <aside className="flex h-full w-[var(--dens-side)] shrink-0 flex-col border-r border-line bg-surface">
@@ -49,11 +49,6 @@ export function Sidebar() {
             >
               <Icon size={15} strokeWidth={1.8} />
               <span className="flex-1 text-left">{item.label}</span>
-              {item.view === 'logs' && running > 0 && (
-                <span className="grid h-[16px] min-w-[16px] place-items-center rounded-full bg-accent text-[9.5px] font-medium text-white">
-                  {running}
-                </span>
-              )}
             </button>
           );
         })}
@@ -139,8 +134,11 @@ function LanguageSwitch() {
 }
 
 export function TopBar() {
-  const { view, theme, setTheme, setPalette } = useApp();
+  const { view, theme, setTheme, setPalette, tasks, setTasksOpen } = useApp();
   const t = TITLES[view];
+  const running = tasks.filter((x) => x.status === 'running').length;
+  const failed = tasks.filter((x) => x.status === 'error').length;
+  const badge = running > 0 ? running : failed > 0 ? failed : 0;
 
   return (
     <header className="flex h-[var(--dens-topbar)] shrink-0 items-center gap-3 border-b border-line px-6">
@@ -156,6 +154,29 @@ export function TopBar() {
         <Search size={13} />
         <span className="flex-1 text-left">搜索游戏或操作</span>
         <kbd className="kbd">Ctrl K</kbd>
+      </button>
+
+      <button
+        onClick={() => setTasksOpen(true)}
+        className="btn btn-icon relative"
+        aria-label={badge > 0 ? `任务中心（${badge}）` : '任务中心'}
+        title={
+          running > 0
+            ? `${running} 个任务进行中`
+            : failed > 0
+              ? `${failed} 个任务失败`
+              : '任务中心'
+        }
+      >
+        <ListChecks size={15} />
+        {badge > 0 && (
+          <span
+            className="absolute -right-0.5 top-0 grid h-[15px] min-w-[15px] place-items-center rounded-full px-1 text-[9px] font-medium text-white"
+            style={{ background: running > 0 ? 'var(--s-accent)' : 'var(--s-danger)' }}
+          >
+            {badge}
+          </span>
+        )}
       </button>
 
       <LanguageSwitch />

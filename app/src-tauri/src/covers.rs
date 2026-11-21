@@ -300,12 +300,16 @@ fn from_steam(name: &str) -> Result<Vec<u8>, String> {
                             }
                         }
                         Err(e) => {
+                            // release 构建里没有调试输出，显式标记为已使用，避免 unused 警告
+                            let _ = &e;
                             #[cfg(debug_assertions)]
                             eprintln!("[cover] {file} -> read error {e}");
                         }
                     }
                 }
                 Err(e) => {
+                    // release 构建里没有调试输出，显式标记为已使用，避免 unused 警告
+                    let _ = &e;
                     #[cfg(debug_assertions)]
                     eprintln!("[cover] {file} -> send error {e}");
                 }

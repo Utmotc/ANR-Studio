@@ -16,7 +16,7 @@ import {
 import { clsx, fullDate, SOURCE_LABEL, statusOf, versionKnown } from '../lib';
 import { call, errorText, isTauri } from '../lib/ipc';
 import { useApp } from '../store';
-import type { SnapshotInfo } from '../types';
+import type { Game, SnapshotInfo } from '../types';
 import { Cover, MetaRow, Select, Stepper, Toggle } from './ui';
 
 const PATH_OPTIONS = [
@@ -111,7 +111,7 @@ export function Drawer() {
               tone="accent"
               icon={<Info size={13} />}
               title="游戏正在运行"
-              desc="安装、卸载与切换版本已禁用。开关与参数会写入配置，重启游戏后生效。"
+              desc="安装、卸载、切换版本与写配置都已禁用：OptiScaler 退出时会把内存里的设置写回 ini，运行中改的会被覆盖。先退出游戏再操作。"
             />
           )}
           {!anr && game.thirdPartyOptiScaler && (
@@ -199,7 +199,11 @@ export function Drawer() {
                     写入 OptiScaler.ini 的 [FrameGen] Enabled；关闭只是停用，文件仍留在游戏目录
                   </p>
                 </div>
-                <Toggle checked={anr.enabled} onChange={() => toggleEnabled(game.id)} />
+                <Toggle
+                  checked={anr.enabled}
+                  disabled={game.running}
+                  onChange={() => toggleEnabled(game.id)}
+                />
               </div>
 
               <div className="mt-3 rounded-[12px] border border-line px-3.5 py-3">
@@ -302,7 +306,13 @@ export function Drawer() {
                   </span>
                 </button>
                 {advOpen && (
-                  <div className="space-y-3 border-t border-line-soft px-3.5 py-3">
+                  <div
+                    className={clsx(
+                      'space-y-3 border-t border-line-soft px-3.5 py-3',
+                      game.running && 'pointer-events-none opacity-60',
+                    )}
+                    aria-disabled={game.running}
+                  >
                     <ParamRow label="卷积路径" hint="改动后需重启游戏">
                       <Select
                         value={anr.config.path}
@@ -311,6 +321,7 @@ export function Drawer() {
                         }
                         options={PATH_OPTIONS}
                         className="w-[190px]"
+                        disabled={game.running}
                       />
                     </ParamRow>
                     <ParamRow label="最大生成帧" hint="每个真实帧最多生成 5 帧">
@@ -318,6 +329,7 @@ export function Drawer() {
                         {[2, 3, 4, 5].map((n) => (
                           <button
                             key={n}
+                            disabled={game.running}
                             onClick={() =>
                               updateConfig(game.id, { config: { ...anr.config, maxGenerated: n } })
                             }
@@ -336,6 +348,7 @@ export function Drawer() {
                     <ParamRow label="场景切换保护" hint="避免镜头切换时插帧出错">
                       <Toggle
                         checked={anr.config.sceneCut}
+                        disabled={game.running}
                         onChange={() =>
                           updateConfig(game.id, {
                             config: { ...anr.config, sceneCut: !anr.config.sceneCut },
@@ -378,6 +391,7 @@ export function Drawer() {
           )}
 
           <SnapshotSection gameId={game.id} />
+          {anr && <HealthSection game={game} />}
         </div>
 
         <div className="flex items-center gap-1.5 border-t border-line px-5 py-3">
@@ -422,6 +436,114 @@ export function Drawer() {
           )}
         </div>
       </aside>
+    </div>
+  );
+}
+
+/** 安装体检：列出这个游戏当前所有配置/文件问题，能本地修的直接修 */
+function HealthSection({ game }: { game: Game }) {
+  const { healthIssues, checkHealth, repair } = useApp();
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const issues = healthIssues[game.id] ?? [];
+  const bad = issues.filter((i) => i.level === 'error').length;
+
+  useEffect(() => {
+    setOpen(false);
+    setLoaded(false);
+  }, [game.id]);
+
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    if (next && !loaded) {
+      setLoaded(true);
+      void checkHealth(game.id);
+    }
+  };
+
+  const runRepair = async () => {
+    setBusy(true);
+    try {
+      await repair(game.id);
+      setLoaded(true);
+      setOpen(true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-3 overflow-hidden rounded-[12px] border border-line">
+      <button
+        onClick={toggle}
+        className="flex w-full items-center justify-between px-3.5 py-2.5 text-left transition-colors hover:bg-surface-2/60"
+      >
+        <span className="flex items-center gap-2">
+          <AlertTriangle size={13} className={bad ? 'text-warn' : 'text-ink-3'} />
+          <span className="text-[12.5px] font-medium">安装体检</span>
+          {issues.length > 0 && (
+            <span className="num text-[10.5px] text-ink-3">{issues.length}</span>
+          )}
+        </span>
+        <span className="flex items-center gap-1 text-[11px] text-ink-3">
+          {issues.length === 0 && loaded ? '没有发现问题' : '检查文件与配置'}
+          <ChevronDown size={14} className={clsx('transition-transform', open && 'rotate-180')} />
+        </span>
+      </button>
+      {open && (
+        <div className="border-t border-line-soft px-3.5 py-3">
+          {issues.length === 0 ? (
+            <p className="py-1 text-[11px] leading-relaxed text-ink-3">
+              没有发现问题。安装状态、provider 文件、代理 DLL 与 ini 关键项都在。
+            </p>
+          ) : (
+            <div className="space-y-1.5">
+              {issues.map((it) => (
+                <div
+                  key={it.code}
+                  className="rounded-[8px] border border-line-soft px-2.5 py-2"
+                >
+                  <p className="flex items-center gap-1.5 text-[11.5px] font-medium">
+                    <span
+                      className="h-[5px] w-[5px] shrink-0 rounded-full"
+                      style={{
+                        background: it.level === 'error' ? 'var(--s-danger)' : 'var(--s-warn)',
+                      }}
+                    />
+                    {it.title}
+                    {it.fixable && (
+                      <span className="rounded bg-accent-soft px-1 py-[1px] text-[9px] text-accent">
+                        可修复
+                      </span>
+                    )}
+                  </p>
+                  <p className="mt-1 text-[10.5px] leading-relaxed text-ink-3">{it.detail}</p>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="mt-2.5 flex items-center gap-2">
+            <button
+              className="btn btn-ghost h-7 text-[11px]"
+              onClick={() => void checkHealth(game.id)}
+              disabled={busy}
+            >
+              <RefreshCw size={11} />
+              重新检查
+            </button>
+            <button
+              className="btn btn-primary h-7 text-[11px]"
+              onClick={() => void runRepair()}
+              disabled={busy || game.running}
+            >
+              {busy ? '修复中…' : '一键修复'}
+            </button>
+            {game.running && <span className="text-[10px] text-ink-3">游戏运行中，先退出</span>}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

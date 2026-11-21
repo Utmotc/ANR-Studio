@@ -2,6 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::UNIX_EPOCH;
 
 use sha2::{Digest, Sha256};
 
@@ -45,6 +47,49 @@ pub fn sha256_file(path: &Path) -> Option<String> {
     Some(hex::encode(hasher.finalize()))
 }
 
+/// provider DLL 有 30 MB 级，而 `rescan` 每改一次配置都会跑一遍。
+/// 指纹只取决于文件内容，所以按 (路径, 大小, mtime) 缓存，Steam 校验/换版本后 mtime 变，自然失效。
+pub fn sha256_file_cached(path: &Path) -> Option<String> {
+    let meta = fs::metadata(path).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let key = path.to_string_lossy().to_string();
+    let stamp = (meta.len(), mtime);
+
+    if mtime != 0 {
+        if let Some(hit) = hash_cache()
+            .lock()
+            .ok()
+            .and_then(|c| c.get(&key).cloned())
+        {
+            if hit.0 == stamp {
+                return Some(hit.1);
+            }
+        }
+    }
+
+    let hash = sha256_file(path)?;
+    if mtime != 0 {
+        if let Ok(mut cache) = hash_cache().lock() {
+            if cache.len() >= 512 {
+                cache.clear();
+            }
+            cache.insert(key, (stamp, hash.clone()));
+        }
+    }
+    Some(hash)
+}
+
+static HASH_CACHE: OnceLock<Mutex<HashMap<String, ((u64, u64), String)>>> = OnceLock::new();
+
+fn hash_cache() -> &'static Mutex<HashMap<String, ((u64, u64), String)>> {
+    HASH_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 pub fn fnv_id(s: &str) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in s.to_ascii_lowercase().bytes() {
@@ -80,12 +125,12 @@ pub fn newest_log(game: &Path) -> Option<PathBuf> {
 
 fn parse_config(game: &Path) -> NrFgConfig {
     let mut cfg = NrFgConfig::default();
-    if !nrf_g_ini(game).exists() {
+    let Ok(text) = fs::read_to_string(nrf_g_ini(game)) else {
         return cfg;
-    }
-    // nr_fg.ini 是扁平结构（没有 section），直接按顶层 key 读
+    };
+    // nr_fg.ini 是扁平结构（没有 section），直接按顶层 key 读；只读一次文件
     for key in ["path", "model_size", "nits_per_unit", "max_generated", "scene_cut"] {
-        if let Some(v) = flat_get(game, key) {
+        if let Some(v) = flat_get_str(&text, key) {
             match key {
                 "path" => cfg.path = v,
                 "model_size" => cfg.model_size = v,
@@ -99,8 +144,7 @@ fn parse_config(game: &Path) -> NrFgConfig {
     cfg
 }
 
-fn flat_get(game: &Path, key: &str) -> Option<String> {
-    let text = fs::read_to_string(nrf_g_ini(game)).ok()?;
+fn flat_get_str(text: &str, key: &str) -> Option<String> {
     for line in text.lines() {
         let t = line.trim();
         if t.starts_with(';') || t.starts_with('#') {
@@ -150,7 +194,7 @@ pub fn inspect_anr(game: &Path, catalog: &HashMap<String, String>) -> Option<Anr
                 .unwrap_or_else(|_| now_iso())
         });
 
-    let full_hash = sha256_file(&provider_dll(game));
+    let full_hash = sha256_file_cached(&provider_dll(game));
     let version = full_hash
         .as_ref()
         .and_then(|h| catalog.get(h).cloned())

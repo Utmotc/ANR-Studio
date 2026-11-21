@@ -41,6 +41,10 @@ ANR（Apex Neural Rendering）的非官方图形化管理工具。把「跑命�
 |---|---|
 | ![设置](docs/screenshots/settings.png) | ![检查](docs/screenshots/precheck.png) |
 
+任务中心（0.3.0）：安装、卸载、切换版本、预下载都在这里排队，失败原因可展开，失败可直接重试。
+
+![任务中心](docs/screenshots/tasks.png)
+
 ## 已实现
 
 - **游戏发现**：Steam（注册表 + `libraryfolders.vdf` + `appmanifest_*.acf`）、Epic（Manifests）、GOG（注册表）、手动添加
@@ -51,14 +55,19 @@ ANR（Apex Neural Rendering）的非官方图形化管理工具。把「跑命�
 - **参数**：`nr_fg.ini` 的卷积路径、最大生成帧、场景切换保护、HDR 亮度
 - **版本切换 / 回滚**：覆盖安装，`nr_fg.ini` 自动保留
 - **卸载**：full 按哈希校验还原 `dxgi.dll` 与 `OptiScaler.ini` 并删除 OptiScaler 目录；addon 只移除 ANR 目录并把 ini 恢复成安装前的值
-- **安全前置**：游戏运行中阻断、VC++ 运行时提示、卸载前强制快照
+- **安全前置**：游戏运行中阻断、VC++ 运行时提示、卸载前自动快照（可在设置里关闭）
 - **快照恢复**：快照包含 `OptiScaler/`、代理 DLL 与 `OptiScaler.ini`；抽屉里可列出并恢复，旧快照仍兼容但会标「旧版」
 - **失败闭环**：安装/切换失败弹窗提供「重试 / 生成诊断包 / 回滚到快照」，并展示安装器原始输出
+- **任务中心**：安装 / 卸载 / 切换 / 预下载全部进任务队列，右上角有计数入口（`Ctrl+Shift+J`），可看历史、进度、失败原因，失败可直接重试
+- **批量操作**：多选后一次确认、顺序执行，批量安装 / 批量卸载 / 批量开关 / 批量更新到最新，结束后给「成功 N、失败 M」汇总
+- **运行状态实时化**：每 5 秒检查一次进程与代理 DLL 占用；所有写操作（安装 / 卸载 / 切换 / 开关 / 调参 / 修复）执行前后都会实时复查，游戏运行时直接拒绝
+- **安装体检**：检查 provider 文件、代理 DLL、OptiScaler.ini 关键项与安装记录，能本地修的（写回 `FGNvngxReplacement`、从备份还原 DLL/ini）一键修复，修不了的明确提示重装
+- **安装脚本保护**：`-NonInteractive` + stdin 断开，脚本不会再卡在交互提示；10 分钟超时与取消都会终止进程并回滚
 - **日志与诊断**：读最新 `nr_fg-*.log`、一键打包（日志 + 两个 ini + 安装记录 + 系统信息）
 
 ## 界面细节
 
-- **自绘标题栏**：关闭系统装饰（`decorations: false`），自绘 36px 标题栏 —— 左侧是「界面 / 工具 / 关于」多级菜单（主题、密度、字体大小、重新扫描、打开数据目录都能两级点到位），中间是应用名与版本号，右侧是最小化 / 最大化（还原）/ 关闭
+- **自绘标题栏**：关闭系统装饰（`decorations: false`），自绘 36px 标题栏 —— 左侧是「界面 / 工具 / 关于」多级菜单（主题、密度、字体大小、重新扫描、打开数据目录都能两级点到位），中间是应用名与版本号，右侧是任务中心 / 语言 / 主题 / 最小化 / 最大化（还原）/ 关闭
 - **界面密度**：标准 / 紧凑。紧凑模式收窄留白、卡片内边距、导航与顶栏高度，卡片最小宽度 228px → 184px，同一行多放一个
 - **总览页**：不看统计卡，直接给「已启用 x/y + 一条状态带（每个已装游戏一段色块）」；左栏是需要处理与最近使用，右栏是当前版本与快捷操作
 - **游戏改名**：右键卡片 →「修改游戏名」，名字只影响显示与封面搜索，不动游戏文件
@@ -114,19 +123,22 @@ cd app/src-tauri && cargo check
 ANR-Studio/
 ├─ app/                     应用源码
 │  ├─ src/                    前端
-│  │  ├─ components/          Sidebar/TopBar、GameCard、Drawer、CommandPalette、Overlays、ui
-│  │  ├─ views/               Overview / Library / Versions / Logs / Settings
+│  │  ├─ components/          GameCard、Drawer、CommandPalette、TaskCenter、Overlays、ui
+│  │  ├─ views/               Overview / Library / Versions / Tuning / Logs / Settings
 │  │  ├─ lib/ipc.ts           Tauri 调用封装（浏览器里自动回退到演示数据）
+│  │  ├─ lib/focus.ts         弹层焦点陷阱
+│  │  ├─ i18n/                运行时字典（简体中文 / English）
 │  │  ├─ store.ts             状态与动作（Zustand）
 │  │  └─ index.css            设计 token（深浅两套 + 密度变量）
 │  ├─ src-tauri/src/
 │  │  ├─ lib.rs               Tauri 命令层（扫描/安装/卸载/开关/日志/封面/诊断）
-│  │  ├─ scan.rs              Steam / Epic / GOG / 手动 + exe 判定 + 进程检测
-│  │  ├─ inspect.rs           安装状态与配置解析、SHA256 指纹
+│  │  ├─ scan.rs              Steam / Epic / GOG / 手动 + exe 判定（带缓存）+ 进程检测
+│  │  ├─ inspect.rs           安装状态与配置解析、SHA256 指纹（带缓存）
 │  │  ├─ installer.rs         下载、校验、解压、调官方脚本、快照、卸载还原
+│  │  ├─ health.rs            安装体检与一键修复
 │  │  ├─ covers.rs            封面搜索与缓存（Steam 商店 → GOG 回落）
 │  │  ├─ releases.rs          GitHub Releases + SHA256SUMS + 镜像前缀
-│  │  ├─ ini.rs               ini 原子读写（保留 BOM/换行风格）
+│  │  ├─ ini.rs               ini 原子读写（保留 BOM/换行风格/行内注释）
 │  │  ├─ logs.rs              日志读取与诊断包
 │  │  ├─ changelog.rs         release 正文解析 + 中文翻译缓存
 │  │  └─ model.rs paths.rs    数据结构与本地存储

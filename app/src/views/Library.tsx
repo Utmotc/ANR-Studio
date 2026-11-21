@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { LayoutGrid, Library as LibraryIcon, List, Plus, Search, X } from 'lucide-react';
+import { Check, LayoutGrid, Library as LibraryIcon, List, Plus, Search, X } from 'lucide-react';
 import { clsx, needsAttention, versionKnown } from '../lib';
 import { useApp } from '../store';
 import { GameCard, GameRow } from '../components/GameCard';
@@ -28,9 +28,10 @@ export function Library() {
     clearSelect,
     selectMany,
     addGame,
-    install,
-    uninstall,
-    toggleEnabled,
+    installMany,
+    uninstallMany,
+    toggleMany,
+    switchMany,
   } = useApp();
   const latest = versions.find((v) => v.latest)?.tag ?? versions[0]?.tag ?? '—';
 
@@ -92,6 +93,23 @@ export function Library() {
             </button>
           )}
         </div>
+
+        <button
+          onClick={() => (allSelected ? clearSelect() : selectMany(list.map((g) => g.id)))}
+          className="btn btn-ghost h-8 px-2 text-[11px]"
+          title={allSelected ? '取消全选' : '全选当前列表'}
+          aria-pressed={allSelected}
+        >
+          <span
+            className={clsx(
+              'grid h-[13px] w-[13px] place-items-center rounded-[4px] border',
+              allSelected ? 'border-transparent bg-accent text-white' : 'border-line',
+            )}
+          >
+            {allSelected && <Check size={9} strokeWidth={3} />}
+          </span>
+          全选
+        </button>
 
         <Segmented
           options={[
@@ -164,21 +182,30 @@ export function Library() {
             <span className="mx-1 h-4 w-px bg-line" />
             <button
               className="btn btn-primary h-7 text-[11.5px]"
-              onClick={() => selected.forEach((id) => install(id))}
+              onClick={() => void installMany(selected)}
             >
               批量安装
             </button>
+            {versionKnown(latest) && (
+              <button
+                className="btn btn-ghost h-7 text-[11.5px]"
+                onClick={() => void switchMany(selected, latest)}
+                title={`把选中的游戏都切换/更新到 ${latest}`}
+              >
+                更新到 {latest}
+              </button>
+            )}
             <button
               className="btn btn-ghost h-7 text-[11.5px]"
-              onClick={() => selected.forEach((id) => toggleEnabled(id))}
+              onClick={() => void toggleMany(selected)}
             >
               批量开关
             </button>
             <button
               className="btn btn-danger h-7 text-[11.5px]"
-              onClick={() => selected.forEach((id) => uninstall(id))}
+              onClick={() => void uninstallMany(selected)}
             >
-              卸载
+              批量卸载
             </button>
             <button className="btn btn-icon h-7 w-7" onClick={clearSelect} aria-label="取消选择">
               <X size={13} />

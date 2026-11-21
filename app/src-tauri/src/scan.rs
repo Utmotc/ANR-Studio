@@ -1,7 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
+use std::time::UNIX_EPOCH;
 
 use crate::paths::file_mtime_iso;
 
@@ -252,16 +254,62 @@ fn walk_exes(dir: &Path, depth: usize, out: &mut Vec<(PathBuf, u64)>) {
 }
 
 /// 找出游戏目录里的主程序：优先用已知路径，否则取体积最大的非安装器 exe（与官方安装器的判定一致）。
+///
+/// 0.3.0 起带缓存：以「目录 + 目录 mtime」为键，命中后只 verify 一下文件还在，
+/// 不再递归遍历。Steam 库有几十个游戏时，这是 `rescan` 最大的一笔开销。
 pub fn find_exe(dir: &Path, hint: Option<&Path>) -> Option<PathBuf> {
     if let Some(h) = hint {
         if h.is_file() {
             return Some(h.to_path_buf());
         }
     }
+    let key = dir.to_string_lossy().to_string();
+    let stamp = dir_stamp(dir);
+    if stamp != 0 {
+        let hit = exe_cache()
+            .lock()
+            .ok()
+            .and_then(|c| c.get(&key).cloned());
+        if let Some((cached_stamp, name)) = hit {
+            if cached_stamp == stamp {
+                let p = dir.join(&name);
+                if p.is_file() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+
     let mut found = Vec::new();
     walk_exes(dir, 3, &mut found);
     found.sort_by(|a, b| b.1.cmp(&a.1));
-    found.into_iter().next().map(|(p, _)| p)
+    let best = found.into_iter().next().map(|(p, _)| p)?;
+    if stamp != 0 {
+        if let Some(name) = best.file_name().map(|n| n.to_string_lossy().to_string()) {
+            if let Ok(mut cache) = exe_cache().lock() {
+                if cache.len() >= 512 {
+                    cache.clear();
+                }
+                cache.insert(key, (stamp, name));
+            }
+        }
+    }
+    Some(best)
+}
+
+static EXE_CACHE: OnceLock<Mutex<HashMap<String, (u64, String)>>> = OnceLock::new();
+
+fn exe_cache() -> &'static Mutex<HashMap<String, (u64, String)>> {
+    EXE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn dir_stamp(dir: &Path) -> u64 {
+    fs::metadata(dir)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
 }
 
 pub fn running_names() -> HashSet<String> {
@@ -280,6 +328,49 @@ pub fn running_names() -> HashSet<String> {
         }
     }
     set
+}
+
+/// 实时判定「这个游戏现在是不是在跑」。
+///
+/// 只看进程名会有两个方向的错：同名 exe 误报、启动器/子进程漏报。所以再加一条兜底：
+/// 代理 DLL 如果正被别的进程以独占方式持有（Windows 上加载中的模块就是这种状态），
+/// 那游戏一定在跑——即便进程名对不上。
+pub fn game_running(dir: &Path, exe: &str) -> bool {
+    let names = running_names();
+    game_running_with(dir, exe, &names)
+}
+
+pub fn game_running_with(dir: &Path, exe: &str, names: &HashSet<String>) -> bool {
+    let lower = exe.trim().to_ascii_lowercase();
+    if !lower.is_empty() && names.contains(&lower) {
+        return true;
+    }
+    ["dxgi.dll", "winmm.dll", "version.dll"]
+        .iter()
+        .any(|dll| {
+            let p = dir.join(dll);
+            p.is_file() && file_is_locked(&p)
+        })
+}
+
+/// 只有共享冲突（32）/ 锁冲突（33）才算「被占用」；
+/// 权限不足之类的其它错误不能当成游戏在跑，否则只读目录会永远装不上。
+#[cfg(windows)]
+fn file_is_locked(path: &Path) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    match fs::OpenOptions::new()
+        .write(true)
+        .share_mode(0)
+        .open(path)
+    {
+        Ok(_) => false,
+        Err(e) => matches!(e.raw_os_error(), Some(32) | Some(33)),
+    }
+}
+
+#[cfg(not(windows))]
+fn file_is_locked(_path: &Path) -> bool {
+    false
 }
 
 pub fn scan(manual: &[String]) -> Vec<RawGame> {

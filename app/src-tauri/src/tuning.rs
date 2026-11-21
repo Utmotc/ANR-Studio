@@ -572,11 +572,25 @@ fn infer_kind(v: &str) -> &'static str {
     "text"
 }
 
+/// 节名 / 键名只允许普通标识符字符。
+/// 不校验的话，前端传一个带换行的 key 就能往 ini 里注入任意行。
+fn ident_ok(s: &str) -> bool {
+    let t = s.trim();
+    !t.is_empty()
+        && t.len() <= 64
+        && !t.contains(['\r', '\n', '[', ']', '=', ';', '#'])
+}
+
 pub fn write(dir: &Path, section: &str, key: &str, value: &str) -> Result<String, String> {
     let path = crate::inspect::ini_path(dir);
     if !path.exists() {
         return Err("找不到 OptiScaler.ini".into());
     }
+    if !ident_ok(section) || !ident_ok(key) {
+        return Err("参数名不合法（不能包含换行、方括号或等号）".into());
+    }
+    let section = section.trim();
+    let key = key.trim();
     if value.contains('\n') || value.contains('\r') {
         return Err("值里不能有换行".into());
     }
@@ -619,4 +633,28 @@ pub fn write(dir: &Path, section: &str, key: &str, value: &str) -> Result<String
     doc.save(&path)
         .map_err(|e| format!("写入 OptiScaler.ini 失败：{e}"))?;
     Ok(value.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_normal_section_and_key() {
+        assert!(ident_ok("FrameGen"));
+        assert!(ident_ok("V-Sync"));
+        assert!(ident_ok("Upscaler Inputs"));
+        assert!(ident_ok("FGNvngxReplacement"));
+    }
+
+    #[test]
+    fn rejects_injection_attempts() {
+        assert!(!ident_ok("FrameGen\nEnabled=false"));
+        assert!(!ident_ok("FrameGen]"));
+        assert!(!ident_ok("[FrameGen"));
+        assert!(!ident_ok("A=B"));
+        assert!(!ident_ok(""));
+        assert!(!ident_ok("   "));
+        assert!(!ident_ok(&"x".repeat(65)));
+    }
 }

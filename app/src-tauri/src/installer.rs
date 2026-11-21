@@ -1,7 +1,9 @@
 use std::fs::{self, File};
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::ini::IniDoc;
 use crate::inspect;
@@ -15,7 +17,7 @@ use crate::scan::hidden;
 /// 否则会出现「列表走直连、zip 却还在过代理」的两套线路，用户按设置根本对不上。
 fn dl_client(mirror: &str) -> Result<reqwest::blocking::Client, String> {
     let use_proxy = mirror != "github" && mirror != "mirror";
-    crate::net::client_with(600, "ANR-Studio/0.1", use_proxy)
+    crate::net::client_with(600, crate::net::API_UA, use_proxy)
 }
 
 fn part_path(dest: &Path) -> PathBuf {
@@ -130,9 +132,14 @@ fn parse_sum(text: &str, file: &str) -> Option<String> {
     None
 }
 
+/// 解压后总体积上限：官方包 ~30 MB，512 MB 已经足够宽松，
+/// 但能挡住被构造成「十亿字节炸弹」的包（即便它侥幸通过哈希校验）。
+const MAX_UNPACKED: u64 = 512 * 1024 * 1024;
+
 fn unzip(zip_path: &Path, dest: &Path) -> Result<(), String> {
     let file = File::open(zip_path).map_err(|e| format!("打开安装包失败：{e}"))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("安装包损坏：{e}"))?;
+    let mut unpacked: u64 = 0;
     for i in 0..archive.len() {
         let mut entry = archive
             .by_index(i)
@@ -140,6 +147,10 @@ fn unzip(zip_path: &Path, dest: &Path) -> Result<(), String> {
         let Some(rel) = entry.enclosed_name().map(|p| p.to_path_buf()) else {
             continue;
         };
+        unpacked = unpacked.saturating_add(entry.size());
+        if unpacked > MAX_UNPACKED {
+            return Err("安装包解压后的体积异常（超过 512 MB），已中止".into());
+        }
         let out_path = dest.join(rel);
         if entry.is_dir() {
             fs::create_dir_all(&out_path).map_err(|e| format!("创建目录失败：{e}"))?;
@@ -346,18 +357,54 @@ fn extract_error(stderr: &str, stdout: &str) -> String {
 pub struct ScriptError {
     pub message: String,
     pub output: String,
+    /// 用户主动取消（调用方据此把任务卡显示成「已取消」而不是「失败」）
+    pub canceled: bool,
 }
 
-pub fn run_install(pkg: &Path, game: &Path, proxy: Option<&str>) -> Result<String, ScriptError> {
+/// 官方安装脚本最长允许跑 10 分钟。正常情况下 10 秒级，
+/// 这里只为兜住「脚本卡在交互提示 / 被安全软件拦住」的情况。
+pub const SCRIPT_TIMEOUT: Duration = Duration::from_secs(600);
+
+fn read_pipe<R: Read + Send + 'static>(mut pipe: R, buf: Arc<Mutex<Vec<u8>>>) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut chunk = [0u8; 8192];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if let Ok(mut v) = buf.lock() {
+                        v.extend_from_slice(&chunk[..n]);
+                    }
+                }
+            }
+        }
+    })
+}
+
+/// 执行官方 `install.ps1`。
+///
+/// 0.3.0 起：
+/// - `-NonInteractive` + `stdin(Stdio::null())`：脚本若走到 `Read-Host` 会立刻失败，
+///   而不是在隐藏窗口里永久挂住；
+/// - 带超时（[`SCRIPT_TIMEOUT`]）与取消检查，取消/超时会**结束进程**并返回；
+/// - stdout/stderr 由独立线程收集，不会因为管道写满而死锁。
+pub fn run_install(
+    pkg: &Path,
+    game: &Path,
+    proxy: Option<&str>,
+    cancel: &dyn Fn() -> bool,
+) -> Result<String, ScriptError> {
     let script = pkg.join("install.ps1");
     if !script.exists() {
         return Err(ScriptError {
             message: "安装包里没有 install.ps1".into(),
             output: String::new(),
+            canceled: false,
         });
     }
     let mut cmd = Command::new("powershell");
     cmd.arg("-NoProfile")
+        .arg("-NonInteractive")
         .arg("-ExecutionPolicy")
         .arg("Bypass")
         .arg("-File")
@@ -367,24 +414,102 @@ pub fn run_install(pkg: &Path, game: &Path, proxy: Option<&str>) -> Result<Strin
         cmd.arg(p);
     }
     hidden(&mut cmd);
-    let out = cmd
-        .output()
-        .map_err(|e| ScriptError {
-            message: format!("启动安装器失败：{e}"),
-            output: String::new(),
-        })?;
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    if !out.status.success() {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| ScriptError {
+        message: format!("启动安装器失败：{e}"),
+        output: String::new(),
+        canceled: false,
+    })?;
+
+    let out_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let err_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let out_thread = child
+        .stdout
+        .take()
+        .map(|p| read_pipe(p, out_buf.clone()));
+    let err_thread = child
+        .stderr
+        .take()
+        .map(|p| read_pipe(p, err_buf.clone()));
+
+    let started = Instant::now();
+    let mut canceled = false;
+    let mut timed_out = false;
+    let status = loop {
+        if cancel() {
+            canceled = true;
+            let _ = child.kill();
+            break child.wait().ok();
+        }
+        if started.elapsed() > SCRIPT_TIMEOUT {
+            timed_out = true;
+            let _ = child.kill();
+            break child.wait().ok();
+        }
+        match child.try_wait() {
+            Ok(Some(st)) => break Some(st),
+            Ok(None) => std::thread::sleep(Duration::from_millis(120)),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(ScriptError {
+                    message: format!("等待安装器失败：{e}"),
+                    output: String::new(),
+                    canceled: false,
+                });
+            }
+        }
+    };
+    if let Some(t) = out_thread {
+        let _ = t.join();
+    }
+    if let Some(t) = err_thread {
+        let _ = t.join();
+    }
+
+    let stdout = {
+        let bytes = out_buf.lock().map(|g| g.clone()).unwrap_or_default();
+        String::from_utf8_lossy(&bytes).to_string()
+    };
+    let stderr = {
+        let bytes = err_buf.lock().map(|g| g.clone()).unwrap_or_default();
+        String::from_utf8_lossy(&bytes).to_string()
+    };
+    let raw = if stderr.trim().is_empty() {
+        stdout.trim().to_string()
+    } else {
+        format!("{}\n{}", stdout.trim(), stderr.trim())
+            .trim()
+            .to_string()
+    };
+
+    if canceled {
+        return Err(ScriptError {
+            message: "已取消（安装器已终止）".into(),
+            output: raw,
+            canceled: true,
+        });
+    }
+    if timed_out {
+        return Err(ScriptError {
+            message: format!(
+                "安装器超过 {} 分钟没有结束，已强制终止（可能是脚本在等待交互输入，或被安全软件拦住）",
+                SCRIPT_TIMEOUT.as_secs() / 60
+            ),
+            output: raw,
+            canceled: false,
+        });
+    }
+
+    let success = status.map(|s| s.success()).unwrap_or(false);
+    if !success {
         let message = extract_error(&stderr, &stdout);
-        let raw = if stderr.trim().is_empty() {
-            stdout
-        } else {
-            format!("{stdout}\n{stderr}")
-        };
         return Err(ScriptError {
             message,
-            output: raw.trim().to_string(),
+            output: raw,
+            canceled: false,
         });
     }
     Ok(stdout)

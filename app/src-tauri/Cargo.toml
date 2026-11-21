@@ -1,6 +1,6 @@
 [package]
 name = "anr-studio"
-version = "0.2.4"
+version = "0.3.0"
 description = "ANR Studio - 非官方 ANR 管理工具"
 authors = ["ANR Studio"]
 edition = "2021"

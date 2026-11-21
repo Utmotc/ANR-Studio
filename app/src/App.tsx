@@ -13,15 +13,15 @@ import {
   MoveDirDialog,
   Onboarding,
   RenameDialog,
-  TaskDock,
 } from './components/Overlays';
+import { TaskCenter, TaskDock } from './components/TaskCenter';
 import { Overview } from './views/Overview';
 import { Library } from './views/Library';
 import { Versions } from './views/Versions';
 import { Tuning } from './views/Tuning';
 import { Logs } from './views/Logs';
 import { SettingsDialog } from './views/Settings';
-import { useApp } from './store';
+import { useApp, applyTheme } from './store';
 import { isTauri, onCloseRequest, onCover, onTask } from './lib/ipc';
 import { applyLocale, type Locale } from './i18n';
 import { installFocusTrap } from './lib/focus';
@@ -103,7 +103,8 @@ export default function App() {
   }, [addGame, toast]);
 
   useEffect(() => {
-    document.documentElement.dataset.theme = settings.theme === 'light' ? 'light' : 'dark';
+    // 「跟随系统」由 applyTheme 解析，这里只负责同步密度
+    applyTheme(settings.theme);
     document.documentElement.dataset.density = settings.density === 'compact' ? 'compact' : 'cozy';
   }, [settings.theme, settings.density]);
 
@@ -137,9 +138,17 @@ export default function App() {
         e.preventDefault();
         setPalette(true);
       }
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'j') {
+        e.preventDefault();
+        useApp.getState().setTasksOpen(!useApp.getState().tasksOpen);
+      }
       if (e.key === 'Escape') {
+        const s = useApp.getState();
+        // 层级从高到低：确认框 → 命令面板 → 任务中心 → 抽屉
+        if (s.confirm) return;
         if (paletteOpen) setPalette(false);
-        else if (!confirm) closeDrawer();
+        else if (s.tasksOpen) s.setTasksOpen(false);
+        else closeDrawer();
       }
     };
     window.addEventListener('keydown', onKey);
@@ -182,6 +191,7 @@ export default function App() {
       </div>
       <Drawer />
       <CommandPalette />
+      <TaskCenter />
       <ConfirmDialog />
       <FailureDialog />
       <SettingsDialog />
