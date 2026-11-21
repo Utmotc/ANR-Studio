@@ -373,7 +373,6 @@ pub fn mirror_url(url: &str, mirror: &str) -> String {
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn rel(tag: &str, published_at: &str) -> Release {
         Release {
@@ -389,10 +388,7 @@ mod tests {
     }
 
     fn tmp(label: &str) -> PathBuf {
-        let n = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let p = std::env::temp_dir().join(format!("anr-studio-{label}-{}-{n}", std::process::id()));
-        fs::create_dir_all(&p).unwrap();
-        p
+        crate::paths::test_dir(&format!("releases-{label}"))
     }
 
     fn sample(n: usize) -> Vec<Release> {

@@ -20,6 +20,54 @@ const PATCH: Record<string, string> = {
   已切到自动: 'Switched to auto',
   '当前为 auto，由 OptiScaler 自己决定用哪个 provider；不确定时选这个。':
     'Set to auto — OptiScaler decides which provider to use. Pick this when unsure.',
+  // 0.4.0：日志跟随 / 崩溃提示 / 自动更新 / 代理 DLL
+  跟随中: 'Following',
+  已暂停: 'Paused',
+  暂停自动跟随: 'Pause auto-follow',
+  恢复自动跟随: 'Resume auto-follow',
+  '重新读取（回到日志末尾）': 'Reload (jump to end)',
+  上次运行出现了异常: 'Last run crashed',
+  界面异常: 'UI error',
+  程序崩溃: 'Crash',
+  生成诊断包: 'Diagnostic bundle',
+  忽略这次崩溃报告: 'Ignore this crash report',
+  已忽略这次崩溃报告: 'Crash report ignored',
+  崩溃诊断包已生成: 'Crash diagnostic bundle created',
+  界面渲染出错了: 'The interface hit an error',
+  重新加载界面: 'Reload interface',
+  复制错误信息: 'Copy error details',
+  自动检查更新: 'Check for updates',
+  仅提示: 'Notify only',
+  当前版本: 'Current version',
+  检查: 'Check',
+  开始下载更新: 'Starting update download',
+  更新失败: 'Update failed',
+  已经是最新版本: 'Already up to date',
+  检查更新失败: 'Update check failed',
+  崩溃报告目录: 'Crash report folder',
+  更换代理DLL失败: 'Failed to switch proxy DLL',
+  重新安装并切换: 'Reinstall and switch',
+  '更换代理名需要重新执行一次官方安装脚本，安装包没缓存时会先下载。':
+    'Changing the proxy name re-runs the official install script, which may download the package first.',
+  'dxgi.dll：通用情况，绝大多数游戏用这个':
+    'dxgi.dll — the general choice; works for most games',
+  'winmm.dll：Vulkan 游戏，或目录里已有别人的 dxgi 代理':
+    'winmm.dll — Vulkan games, or when another dxgi proxy already exists',
+  'version.dll：前两个都冲突时的兜底':
+    'version.dll — fallback when both of the above conflict',
+  '切换前会自动生成快照，失败可回滚':
+    'A snapshot is taken before switching; failures can roll back',
+  通用: 'general',
+  '通用，绝大多数游戏选这个': 'General choice for most games',
+  'Vulkan 游戏，或目录里已有别人的 dxgi 代理':
+    'Vulkan games, or when another dxgi proxy already exists',
+  '前两个都冲突时用它兜底': 'Fallback when the other two conflict',
+  '游戏运行中不能更换代理名，请先退出游戏。':
+    'Cannot change the proxy name while the game is running. Exit the game first.',
+  '正在检查更新…': 'Checking for updates…',
+  '正在下载并安装更新，进度见任务中心': 'Downloading and installing — see the task center',
+  还没检查过: 'Not checked yet',
+  '· 每秒刷新': '· refreshing every second',
 };
 
 const DICTS: Record<Locale, Record<string, string>> = {
@@ -115,6 +163,16 @@ const RULES: Rule[] = [
   [/^批量切换到\s*(.+)：(\d+)\s*个成功$/, (m) => `Switch to ${m[1]}: ${m[2]} succeeded`],
   [/^批量切换到\s*(.+)：成功\s*(\d+)，失败\s*(\d+)$/, (m) => `Switch to ${m[1]}: ${m[2]} succeeded, ${m[3]} failed`],
   [/^(.+) 正在运行$/, (m) => `${m[1]} is running`],
+  // 0.4.0：更新 / 崩溃 / 代理 DLL
+  [/^发现新版本\s*(.+)$/, (m) => `New version ${m[1]} available`],
+  [/^可用新版本\s*(.+)，安装包会验签$/, (m) => `${m[1]} available; the package is signature-verified`],
+  [/^已是最新（v(.+)）$/, (m) => `Up to date (v${m[1]})`],
+  [/^把\s*(.+)\s*的代理 DLL 换成\s*(.+)\s*？$/, (m) => `Switch ${m[1]} to proxy ${m[2]}?`],
+  [/^代理已切到\s*(.+)$/, (m) => `Proxy switched to ${m[1]}`],
+  [/^已切到\s*(.+)$/, (m) => `Switched to ${m[1]}`],
+  [/^共\s*(\d+)\s*条$/, (m) => `${m[1]} total`],
+  [/^当前 v(.+)$/, (m) => `Current v${m[1]}`],
+  [/^可用新版本\s*(.+)$/, (m) => `New version ${m[1]}`],
 ];
 
 function translate(src: string): string {

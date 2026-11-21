@@ -1351,3 +1351,121 @@ Tab 顺序、中文名、英文名都由后端 `Snapshot.tabs` 下发，前端�
 - 配置导入导出、预设档、收藏/标签/排序（v1.0）
 - 仍不支持 Linux/Proton、nr-record、SR/RR
 - 本版新增文案先手工补进了 `src/i18n/en.json`；下次按工具链重跑 `i18n-collect` 时，记得把新条目同步补到 `scripts/i18n-en.txt`，否则 `i18n-build` 会覆盖掉这批手工条目
+
+> v0.4 的完整拆解（签名 / CI / 自动更新 / 崩溃捕获 / 日志跟随 / 帧数统计 / 诊断包升级 / 代理 DLL 覆盖 / CSP / 单实例）见 [`docs/ANR-Studio-v0.4-计划.md`](ANR-Studio-v0.4-计划.md)。
+
+## 附录 T：0.4.0（崩溃捕获 / 自动更新 / 日志跟随 / 诊断包 / 代理 DLL）
+
+> 基线 0.3.0（`86928d1`）。计划见 [`ANR-Studio-v0.4-计划.md`](ANR-Studio-v0.4-计划.md)。
+> 本版把「能装、能用」补成「敢让普通用户装、出问题能诊断」。
+
+### T.1 崩溃捕获（P0-4）
+
+| 层 | 做法 |
+|---|---|
+| 后端 | `crash.rs`：进程启动时 `std::panic::set_hook`，把消息、位置、线程、`Backtrace::force_capture()`、版本、当前视图/最近任务写到 `<数据目录>/crash/crash-<时间戳>.txt`；先写 `.tmp` 再改名，hook 里不调用 Tauri、不做网络 |
+| 前端 | `ErrorBoundary` 包住整棵树；`window.onerror` / `unhandledrejection` 通过 `report_frontend_error` 落到同一目录（`kind: frontend`） |
+| 提示 | 启动时 `crash_list`，有未处理报告就在标题栏下弹 `CrashNotice`：生成诊断包（crash/*.txt + 系统信息 + `manifest.json`）或忽略（写 `.ack`） |
+| 测试 | 报告内容含版本/位置/视图；ack 后不再出现在待处理列表；ack 拒收 crash 目录外的路径 |
+
+`panic = "abort"` 下 hook 仍会在 abort 前执行；hook 内置重入保护，hook 自己 panic 不会递归写文件。
+调试构建可用 `ANR_CRASH_TEST=1` 启动，2 秒后主动 `panic!` 验证整条链路。
+
+hook 在进入 Tauri 事件循环**之前**就安装（`pre_setup_data_dir` 用 `%LOCALAPPDATA%` 提前算出目录）：
+Tauri 是先创建 WebView 再调用 `setup`，如果 WebView2 初始化失败（典型表现就是「双击没反应」），
+setup 根本不会跑，只有提前安装的 hook 才能留下报告。这也验证了本机 WebView2 初始化失败时的落盘。
+
+### T.2 CSP 与外链（P1-9）
+
+- `csp` 从 `null` 收紧为：`default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'`。
+  保留 `unsafe-inline` 是因为 `vite-plugin-singlefile` 把 JS **内联**进 `index.html`（计划里的方案 A），代价是仍然允许内联脚本，但远程脚本、外连、iframe 注入都被挡住。
+- 另配 `devCsp` 放行 `ws://localhost:5173`，避免开发时 HMR 被 CSP 拦掉。
+- `open_url` 从 `cmd /C start "" <url>` 改成直接调 `ShellExecuteW`：URL 不再经过 cmd 解析，`?x=1&y=2` 不会被拆成两条命令；只放行 `http(s)`，拒绝控制字符。前端外链统一走 `lib.ts::openExternal`（桌面端只走 `open_url`，浏览器预览才退回 `window.open`）。
+
+### T.3 代理 DLL 手动覆盖（P1-8）
+
+`set_proxy(id, dll)`：只接受 `dxgi.dll` / `winmm.dll` / `version.dll`，先实时复查进程，再按当前版本走一次完整安装：
+确认未运行 → 快照 → 准备安装包 → `install.ps1 <dir> <dll>` → 校验 `nr_fg_install.json` 里的 `proxy` 真的等于目标值（不等就回滚）。
+抽屉「安装信息」里从只读行改成三段选择 + 每个选项的一句适用说明；切换前弹确认（这是一次重装）。
+
+### T.4 诊断包升级（P1-7）
+
+- 新增 `sysinfo.rs`：PowerShell `Get-CimInstance` 采集 GPU（型号 / 驱动版本 / 驱动日期 / 显存 / 刷新率）、CPU、内存、OS build，以及游戏 exe 的版本资源与大小；WMI 不可用时降级为「未采集到」并写明原因，不让整个诊断包失败。
+- 脱敏（只处理 `ini/json/log/txt`，二进制原样）：`C:\Users\<name>` / `D:/Users/<name>` → `%USERPROFILE%`；当前用户名（≥3 字符）出现的位置 → `%USERNAME%`；17/16 位 SteamID64 中间打码。扫描是单遍的（先找 `users` 候选再跳过），几十 MB 日志也不会退化成 O(n²)。
+- 诊断包新增 `manifest.json`：工具版本、生成时间、脱敏规则版本、每个文件的字节数与 SHA256（哈希的是脱敏后的内容）。
+- 生成后把路径复制到剪贴板，toast 直接给出路径。
+
+### T.5 日志实时跟随（P1-5）
+
+`read_log_since(id, offset, path)`：
+
+- `offset = null`：首次进入，只读文件尾部 256 KB（`reset = true`），不再把整份日志读进内存；
+- `offset` 有值：`seek` 后只读增量，单次上限 256 KB；
+- 文件变小（截断/轮转）或目标日志路径变了（换游戏）→ `reset = true`。
+
+前端每 1 秒拉一次；`document.visibilityState === 'hidden'` 时停轮询、回来补一次。跟随开关按「内容变化后滚到底部」，用户往上滚就暂停；日志文本在内存里只保留尾部 400 K 字符。手动「重新读取」等于重新走一次 `offset = null`。
+
+### T.6 自动更新（P1-3）
+
+- 依赖 `tauri-plugin-updater 2`；`bundle.createUpdaterArtifacts = true` 让构建同时产出安装包与 `.sig`。
+- 更新签名密钥是 minisign（与 Authenticode 两套东西）：`tauri signer generate`，公钥写进 `tauri.conf.json → plugins.updater.pubkey`，私钥只进 CI secrets。
+- 更新源默认 GitHub Releases 的 `latest.json`；设置里的「下载源 = 镜像」时改走 `https://gh-proxy.com/<github url>`（`UpdaterBuilder::endpoints`），验签用的是内置公钥，换线路不影响安全。
+- 设置 → 关于：「自动 / 仅提示 / 关闭」三档，默认仅提示；启动 3 秒后静默检查，断网失败不弹窗，手动检查才提示。下载进度复用任务中心事件，装好后由 NSIS 覆盖安装并重启。
+- 失败兜底：验签失败、下载中断、安装失败都有明确文案，旧版本保留（NSIS per-user 覆盖安装失败不会先删旧目录）。
+
+### T.7 单实例（P2-10）
+
+`tauri-plugin-single-instance` 最先注册：第二个实例在初始化窗口前退出，回调里 `show_main` 把已有窗口从托盘显示出来。避免双开同时写 `settings.json`、同时跑 `rescan`、同时装同一个游戏。
+
+### T.8 签名与 CI（P0-1 / P0-2）
+
+- `.github/workflows/ci.yml`：`npm ci` → `tsc --noEmit` → `vite build` → `cargo test --lib`，Windows runner。
+- `.github/workflows/release.yml`：推 `v*` 或手动输入 tag；校验更新私钥存在 → 生成可选的 `tauri.signing.conf.json`（有 Authenticode 证书才写 `signCommand`）→ `tauri-action` 出草稿 Release（NSIS + `.sig` + `latest.json`）→ 生成并上传 `SHA256SUMS.txt`。
+- `.github/scripts/sign-windows.ps1`：读 `ANR_WINDOWS_CERT_PFX_BASE64` / `ANR_WINDOWS_CERT_PASSWORD` 或 `ANR_WINDOWS_CERT_THUMBPRINT`，用 `signtool` 做 SHA256 + RFC3161 时间戳；没有证书就跳过（本地产物不签名），不会卡住本地构建。
+- `signCommand` 需要绝对路径，所以不写进仓库里的 `tauri.conf.json`，由 CI 生成覆盖配置；这样本机 `tauri build` 不会被固定路径绑死。
+
+### T.9 验证
+
+- `cargo test --lib`：**54 passed / 0 failed / 1 ignored**（新增 crash 4、logs 5、sysinfo 5、lib 2；诊断包用例覆盖脱敏与 manifest 哈希；同时把旧的 `%TEMP%` 测试目录换成仓库内 `target/test-tmp`，受限环境不再误报）
+- `cargo check --all-targets`：0 warning
+- `node node_modules/typescript/bin/tsc --noEmit` 通过；`vite build` 通过（单文件 537 KB）
+- 调试构建 `tauri build --debug --bundles nsis`：配置解析通过，产出 NSIS + `.sig`（更新私钥本地临时注入）
+- release 构建（`--bundles nsis`，LTO + strip + `panic=abort`）：`ANR Studio_0.4.0_x64-setup.exe`（2.6 MB）与 `.sig` 均产出
+- 界面渲染：本机 WebView2 初始化失败（`0x800700AA`，0.3.0 release 同样复现，属环境问题），改用无头 Edge
+  以同样 CSP 渲染 `dist/index.html`：界面正常挂载、`securitypolicyviolation` 为 0，`img-src data:` 封面正常。
+- 崩溃链路：同一 WebView2 失败场景下确认 panic hook 被触发并尝试落盘；当前受管环境禁止进程写
+  `%LOCALAPPDATA%`（沙箱限制），真实机器上落盘路径由 crash 单测覆盖。
+- 手工：诊断包含 GPU/驱动与 `manifest.json`（单测校验脱敏与哈希）；`open_url` 打开 `?x=1&y=2` 正常、`file://` 被拒
+
+### T.10 还没做的
+
+- **帧数 / 延迟统计（P1-6）**：按计划要求等一份真实 `nr_fg-*.log` 样本再写解析器，本版只把日志链路升级为增量读取，不猜字段格式。
+- **Authenticode 证书本身**：代码与 CI 已接好，证书/签名服务需要你按计划第 6 节拍板（SignPath / Certum / Azure Trusted Signing）；没有证书时产物仍未签名。
+- `latest.json` 的镜像兜底目前复用 `gh-proxy`；若要更稳的国内静态地址，仍是计划里的待定项。
+
+### T.11 运维：更新签名密钥
+
+本机已生成一对开发用密钥（`.tauri-keys/`，已 gitignore）。正式发布前：
+
+1. 把 `.tauri-keys/anr-studio.key` 的内容放进仓库 secret `TAURI_SIGNING_PRIVATE_KEY`；
+2. 把 `.tauri-keys/password.txt` 放进 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`；
+3. 公钥已写入 `tauri.conf.json`；**换密钥必须同时换公钥并发布一次带新公钥的版本**，否则旧版本无法验证新更新包；
+4. 私钥/密码不要只留在这台机器上，备份到密码管理器；丢失后无法再给已发布版本推送更新。
+
+### T.12 安装 / 卸载与提权（0.4.0 补丁）
+
+安装包清单是 `asInvoker`，默认装到 `%LOCALAPPDATA%\ANR Studio`，安装和卸载都不需要管理员。之前「装完卸载不掉」的两个真实原因：
+
+1. 应用关闭窗口只是收进托盘，进程还在；NSIS 的卸载检查拿不到它，卸载直接失败。
+2. 如果安装包或应用曾经以管理员身份运行过，普通权限的卸载程序既看不到也杀不掉那个提权进程。
+
+修法：
+
+- 卸载钩子 `NSIS_HOOK_PREUNINSTALL`：先 `taskkill`（正常结束 → 强制），再对 `anr-studio.exe` 做写探测；仍然不行就带 `/ANR_ELEVATED` 用 `ExecShell "runas"` 重新拉起卸载程序（保留 `/UPDATE` / `/S` / `/P`），已经提权过还失败则给出「手动删除 + HKCU 卸载项」的明确提示，不进入 UAC 死循环。
+- 安装钩子的提示从「去用管理员运行」改成「推荐退回默认的用户目录；必须装受保护目录才需要管理员，且以后卸载也会需要」。
+- 安装完成后「运行 ANR Studio」不再默认勾选（`MUI_FINISHPAGE_RUN_NOTCHECKED`）：避免提权安装时把应用也以管理员权限拉起来。
+- 更新检查遇到 404（`latest.json` 还没上传）映射为「还没有可用的更新信息：GitHub Releases 上尚未发布 latest.json」，不再显示成故障。
+
+验证：`cargo test --lib` **54 passed**；重建 NSIS 成功，生成的安装包带新卸载器与更新包 `.sig`。
+
+> 注：已经安装在 `D:\SoftWare\ANR Studio` 的旧副本，用新安装包覆盖安装后会换上新的 `uninstall.exe`；之后卸载即可正常结束进程。旧目录不会自动迁移，想换默认目录请在安装向导里改。

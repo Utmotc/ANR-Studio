@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Check, ChevronRight, ExternalLink, FolderOpen, RefreshCw } from 'lucide-react';
-import { call, isTauri } from '../lib/ipc';
+import { call } from '../lib/ipc';
+import { openExternal } from '../lib';
 import { FONT_LABELS, useApp } from '../store';
 
 const APP_VERSION = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '0.1.0';
@@ -78,8 +79,7 @@ export function AppMenu({ onAbout }: { onAbout: () => void }) {
   };
 
   const openUrl = (url: string) => {
-    if (isTauri) void call('open_url', { url }).catch(() => undefined);
-    else window.open(url, '_blank');
+    void openExternal(url);
   };
 
   const menus: { label: string; items: Item[] }[] = [
@@ -179,8 +179,7 @@ export function AppMenu({ onAbout }: { onAbout: () => void }) {
 export function AboutDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   if (!open) return null;
   const openUrl = (url: string) => {
-    if (isTauri) void call('open_url', { url }).catch(() => undefined);
-    else window.open(url, '_blank');
+    void openExternal(url);
   };
 
   return (

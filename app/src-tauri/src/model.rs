@@ -107,6 +107,10 @@ fn default_layout() -> String {
     "grid".into()
 }
 
+fn default_update_mode() -> String {
+    "prompt".into()
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -154,6 +158,9 @@ pub struct Settings {
     /// 上次运行时的版本，用来判断是否需要刷新系统图标缓存
     #[serde(default)]
     pub last_version: String,
+    /// 自动更新：auto（自动下载）/ prompt（只提示）/ off（不检查）
+    #[serde(default = "default_update_mode")]
+    pub update_mode: String,
 }
 
 impl Settings {
@@ -179,6 +186,7 @@ impl Settings {
             hidden_games: Vec::new(),
             renames: std::collections::HashMap::new(),
             last_version: String::new(),
+            update_mode: "prompt".into(),
         }
     }
 }

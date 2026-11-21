@@ -2,20 +2,24 @@ import { create } from 'zustand';
 import { GAMES, VERSIONS } from './data';
 import { call, errorText, isTauri, type TaskPayload } from './lib/ipc';
 import type {
+  AnrState,
   BatchResult,
   Changelog,
   ConfirmRequest,
+  CrashReport,
   FailureInfo,
   Filter,
   Game,
   HealthIssue,
   InstallKind,
+  LogChunk,
   PrecheckIssue,
   RepairReport,
   Settings,
   Task,
   Theme,
   Toast,
+  UpdateCheck,
   View,
 } from './types';
 
@@ -23,6 +27,15 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const canceled = new Set<string>();
 let seq = 0;
 const uid = (p: string) => `${p}${Date.now().toString(36)}${(seq++).toString(36)}`;
+
+/** 日志框只保留尾部这么多字符：跟随一晚上也不能把内存吃光 */
+const LOG_MAX_CHARS = 400_000;
+function capLog(text: string): string {
+  if (text.length <= LOG_MAX_CHARS) return text;
+  const cut = text.slice(text.length - LOG_MAX_CHARS);
+  const nl = cut.indexOf('\n');
+  return nl >= 0 ? cut.slice(nl + 1) : cut;
+}
 
 type Steps = [string, number][];
 
@@ -62,6 +75,7 @@ const DEFAULT_SETTINGS: Settings = {
   defaultVersion: '',
   locale: 'zh',
   layout: 'grid',
+  updateMode: 'prompt',
 };
 
 export const FONT_SCALES = [0.9, 0.95, 1, 1.08, 1.15];
@@ -206,6 +220,21 @@ interface State {
   logGameId: string;
   logText: string;
   logLoading: boolean;
+  /** v0.4 P1-5：增量读取的位置与目标文件 */
+  logOffset: number;
+  logPath: string;
+  logSize: number;
+  /** 跟随开关：滚动到底部时为 true，往上滚自动暂停 */
+  logFollow: boolean;
+  /** 只让「当前这一轮」的请求写回状态：切游戏/重读后旧请求作废 */
+  logToken: number;
+  /** v0.4 P0-4：待处理的崩溃报告 */
+  crashPending: CrashReport[];
+  /** v0.4 P1-3：自动更新 */
+  updateInfo: UpdateCheck | null;
+  updateChecking: boolean;
+  updateDownloading: boolean;
+  updateError: string;
   addOpen: boolean;
   settingsOpen: boolean;
   closePrompt: boolean;
@@ -222,7 +251,14 @@ interface State {
   pollRunning: () => Promise<void>;
   loadVersions: (refresh?: boolean) => Promise<void>;
   loadLog: (id: string) => Promise<void>;
+  pollLog: (id: string) => Promise<void>;
+  setLogFollow: (on: boolean) => void;
   makeDiag: (id: string) => Promise<void>;
+  refreshCrash: () => Promise<void>;
+  ackCrash: () => Promise<void>;
+  makeCrashDiag: () => Promise<void>;
+  checkUpdate: (manual?: boolean) => Promise<void>;
+  startUpdate: () => Promise<void>;
   repair: (id: string) => Promise<RepairReport | null>;
   checkHealth: (id: string) => Promise<HealthIssue[]>;
   refreshCover: (id: string) => Promise<void>;
@@ -287,6 +323,7 @@ interface State {
   switchMany: (ids: string[], tag: string) => Promise<void>;
   toggleEnabled: (id: string) => Promise<void>;
   toggleMany: (ids: string[]) => Promise<void>;
+  setProxy: (id: string, dll: AnrState['proxy']) => Promise<void>;
   setFgReplacement: (id: string, mode: 'anr' | 'native' | 'auto') => Promise<void>;
   updateConfig: (id: string, patch: Partial<Game['anr']>) => void;
   cancelTask: (id: string) => void;
@@ -479,6 +516,16 @@ export const useApp = create<State>()((set, get) => {
     logGameId: '',
     logText: '',
     logLoading: false,
+    logOffset: 0,
+    logPath: '',
+    logSize: 0,
+    logFollow: true,
+    logToken: 0,
+    crashPending: [],
+    updateInfo: null,
+    updateChecking: false,
+    updateDownloading: false,
+    updateError: '',
     addOpen: false,
     settingsOpen: false,
     closePrompt: false,
@@ -529,6 +576,12 @@ export const useApp = create<State>()((set, get) => {
         void get().loadVersions();
         // R8：启动时自检已缓存包的结构
         void get().checkPackageStructure();
+        // v0.4 P0-4：上次是否闪退过
+        void get().refreshCrash();
+        // v0.4 P1-3：启动 3 秒后静默检查更新（默认「仅提示」不打断用户）
+        if ((s.updateMode ?? 'prompt') !== 'off') {
+          setTimeout(() => void get().checkUpdate(false), 3000);
+        }
         // 运行状态实时化：每 5 秒问一次后端
         watchRunning();
       } catch (e) {
@@ -591,15 +644,55 @@ export const useApp = create<State>()((set, get) => {
         set({ logLoading: false, logText: '' });
         return;
       }
-      set({ logLoading: true });
+      const token = get().logToken + 1;
+      set({ logLoading: true, logToken: token });
       try {
-        const text = await call<string>('get_log', { id });
-        set({ logText: text, logLoading: false });
+        // offset = null：后端直接给尾部 256 KB（reset=true，整段替换）
+        const c = await call<LogChunk>('read_log_since', { id, offset: null, path: null });
+        if (get().logToken !== token) return;
+        set({
+          logText: capLog(c.text),
+          logOffset: c.next,
+          logPath: c.path ?? '',
+          logSize: c.size,
+          logLoading: false,
+          logFollow: true,
+        });
       } catch (e) {
-        set({ logText: '', logLoading: false });
+        if (get().logToken !== token) return;
+        set({ logText: '', logLoading: false, logOffset: 0, logPath: '', logSize: 0 });
         get().toast({ kind: 'warn', title: '读取日志失败', desc: errorText(e) });
       }
     },
+
+    /** 1 秒一次拉增量；切到别的页面/窗口隐藏时不再调用（由 Logs.tsx 控制生命周期） */
+    pollLog: async (id) => {
+      if (!isTauri) return;
+      const token = get().logToken;
+      const { logOffset, logPath, logText } = get();
+      try {
+        const c = await call<LogChunk>('read_log_since', {
+          id,
+          offset: logOffset,
+          path: logPath || null,
+        });
+        if (get().logToken !== token) return;
+        if (!c.text && c.size === get().logSize && !c.reset) {
+          set({ logOffset: c.next, logPath: c.path ?? logPath });
+          return;
+        }
+        set({
+          logText: c.reset ? capLog(c.text) : capLog(logText + c.text),
+          logOffset: c.next,
+          logPath: c.path ?? logPath,
+          logSize: c.size,
+        });
+      } catch {
+        /* 日志暂时读不到（游戏刚退出、文件被占用）：下一轮再试，不打扰用户 */
+      }
+    },
+
+    setLogFollow: (logFollow) => set({ logFollow }),
 
     makeDiag: async (id) => {
       const g = get().games.find((x) => x.id === id);
@@ -609,9 +702,112 @@ export const useApp = create<State>()((set, get) => {
       }
       try {
         const path = await call<string>('make_diag', { id });
-        get().toast({ kind: 'ok', title: '诊断包已生成', desc: path });
+        try {
+          await navigator.clipboard?.writeText(path);
+        } catch {
+          /* 剪贴板不可用不影响结果 */
+        }
+        get().toast({ kind: 'ok', title: '诊断包已生成', desc: `${path}（路径已复制）` });
       } catch (e) {
         get().toast({ kind: 'danger', title: '生成诊断包失败', desc: errorText(e) });
+      }
+    },
+
+    refreshCrash: async () => {
+      if (!isTauri) return;
+      try {
+        const list = await call<CrashReport[]>('crash_list');
+        set({ crashPending: list });
+      } catch {
+        /* 启动阶段后端还没就绪时不打扰 */
+      }
+    },
+
+    ackCrash: async () => {
+      const paths = get().crashPending.map((r) => r.path);
+      if (isTauri && paths.length) {
+        try {
+          await call('crash_ack', { paths });
+        } catch (e) {
+          get().toast({ kind: 'warn', title: '忽略崩溃报告失败', desc: errorText(e) });
+          return;
+        }
+      }
+      set({ crashPending: [] });
+      get().toast({ kind: 'info', title: '已忽略这次崩溃报告' });
+    },
+
+    makeCrashDiag: async () => {
+      if (!isTauri) return;
+      try {
+        const path = await call<string>('make_crash_diag');
+        try {
+          await navigator.clipboard?.writeText(path);
+        } catch {
+          /* 剪贴板不可用不影响结果 */
+        }
+        // 已经留下可提交的材料，就算处理过了，下次启动不再重复提示
+        const paths = get().crashPending.map((r) => r.path);
+        if (paths.length) {
+          try {
+            await call('crash_ack', { paths });
+          } catch {
+            /* 标记失败也只是下次再提示 */
+          }
+        }
+        set({ crashPending: [] });
+        get().toast({
+          kind: 'ok',
+          title: '崩溃诊断包已生成',
+          desc: `${path}（路径已复制到剪贴板）`,
+        });
+      } catch (e) {
+        get().toast({ kind: 'danger', title: '生成崩溃诊断包失败', desc: errorText(e) });
+      }
+    },
+
+    checkUpdate: async (manual) => {
+      if (!isTauri) {
+        if (manual) get().toast({ kind: 'info', title: '浏览器预览模式没有自动更新' });
+        return;
+      }
+      if (get().updateChecking) return;
+      set({ updateChecking: true, updateError: '' });
+      try {
+        const info = await call<UpdateCheck>('check_update');
+        set({ updateInfo: info, updateChecking: false });
+        if (!info.available) {
+          if (manual) {
+            get().toast({ kind: 'ok', title: '已经是最新版本', desc: `当前 v${info.current}` });
+          }
+        } else if (get().settings.updateMode === 'auto') {
+          void get().startUpdate();
+        } else if (manual) {
+          get().toast({
+            kind: 'info',
+            title: `发现新版本 ${info.version}`,
+            desc: '可在「设置 → 关于」里一键更新',
+          });
+        }
+      } catch (e) {
+        const msg = errorText(e);
+        set({ updateChecking: false, updateError: msg });
+        // 静默检查（启动时）失败不弹窗：断网是常态
+        if (manual) get().toast({ kind: 'warn', title: '检查更新失败', desc: msg });
+      }
+    },
+
+    startUpdate: async () => {
+      if (!isTauri) return;
+      if (get().updateDownloading) return;
+      set({ updateDownloading: true });
+      get().toast({ kind: 'info', title: '开始下载更新', desc: '进度在任务中心查看' });
+      try {
+        await call('install_update');
+        // 正常情况下后端会重启应用，走不到这里
+      } catch (e) {
+        set({ updateDownloading: false });
+        get().toast({ kind: 'danger', title: '更新失败', desc: errorText(e) });
       }
     },
 
@@ -959,7 +1155,7 @@ export const useApp = create<State>()((set, get) => {
       }
     },
     setLogGame: (logGameId) => {
-      set({ logGameId, logText: '' });
+      set({ logGameId, logText: '', logOffset: 0, logPath: '', logSize: 0 });
       void get().loadLog(logGameId);
     },
     updateSettings: (patch) => {
@@ -1479,6 +1675,51 @@ export const useApp = create<State>()((set, get) => {
         });
       } catch (e) {
         get().toast({ kind: 'danger', title: '切换失败', desc: errorText(e) });
+      }
+    },
+
+    /** v0.4 P1-8：手动更换代理 DLL。等于一次完整重装，必须确认未运行。 */
+    setProxy: async (id, dll) => {
+      const g = get().games.find((x) => x.id === id);
+      if (!g || !g.anr) return;
+      if (g.anr.proxy === dll) return;
+      if (g.running) {
+        get().toast({
+          kind: 'warn',
+          title: `${g.name} 正在运行`,
+          desc: '请先关闭游戏再更换代理 DLL',
+        });
+        return;
+      }
+      const force = await allowOperation(g, '更换代理 DLL');
+      if (!force) return;
+      const ok = await confirmNow({
+        title: `把 ${g.name} 的代理 DLL 换成 ${dll}？`,
+        body: '更换代理名需要重新执行一次官方安装脚本，安装包没缓存时会先下载。',
+        items: [
+          'dxgi.dll：通用情况，绝大多数游戏用这个',
+          'winmm.dll：Vulkan 游戏，或目录里已有别人的 dxgi 代理',
+          'version.dll：前两个都冲突时的兜底',
+          '切换前会自动生成快照，失败可回滚',
+        ],
+        confirmLabel: '重新安装并切换',
+        tone: 'warn',
+      });
+      if (!ok) return;
+      if (!isTauri) {
+        patchGame(id, (game) =>
+          game.anr ? { ...game, anr: { ...game.anr, proxy: dll } } : game,
+        );
+        get().toast({ kind: 'ok', title: `已切到 ${dll}`, desc: '演示模式' });
+        return;
+      }
+      try {
+        await call('set_proxy', { id, dll, force });
+        await get().rescan();
+        get().toast({ kind: 'ok', title: `代理已切到 ${dll}`, desc: '抽屉里显示与实际安装记录一致' });
+      } catch (e) {
+        await get().rescan();
+        get().toast({ kind: 'danger', title: '更换代理 DLL 失败', desc: errorText(e) });
       }
     },
 

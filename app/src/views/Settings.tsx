@@ -11,8 +11,8 @@ import {
   Shield,
   X,
 } from 'lucide-react';
-import { clsx } from '../lib';
-import { call, isTauri } from '../lib/ipc';
+import { clsx, openExternal } from '../lib';
+import { call } from '../lib/ipc';
 import { FONT_LABELS, useApp } from '../store';
 import { Segmented, Toggle } from '../components/ui';
 
@@ -75,6 +75,12 @@ export function SettingsDialog() {
     setSettingsOpen,
     refreshCatalog,
     catalogBusy,
+    updateInfo,
+    updateChecking,
+    updateDownloading,
+    updateError,
+    checkUpdate,
+    startUpdate,
   } = useApp();
   const [section, setSection] = useState<Section>('look');
   const close = () => setSettingsOpen(false);
@@ -420,6 +426,66 @@ export function SettingsDialog() {
 
           {section === 'about' && (
             <>
+              <Group title="更新">
+                <Row
+                  title="自动检查更新"
+                  desc="启动 3 秒后静默检查；自动模式下会直接下载，装好后提示重启"
+                >
+                  <Segmented
+                    size="sm"
+                    value={settings.updateMode ?? 'prompt'}
+                    onChange={(v) =>
+                      updateSettings({ updateMode: v as typeof settings.updateMode })
+                    }
+                    options={[
+                      { value: 'auto', label: '自动' },
+                      { value: 'prompt', label: '仅提示' },
+                      { value: 'off', label: '关闭' },
+                    ]}
+                  />
+                </Row>
+                <Row
+                  title="当前版本"
+                  desc={
+                    updateDownloading
+                      ? '正在下载并安装更新，进度见任务中心'
+                      : updateChecking
+                        ? '正在检查更新…'
+                        : updateError
+                          ? updateError
+                          : updateInfo
+                            ? updateInfo.available
+                              ? `可用新版本 ${updateInfo.version}，安装包会验签`
+                              : `已是最新（v${updateInfo.current}）`
+                            : '还没检查过'
+                  }
+                  last
+                >
+                  <div className="flex items-center gap-1.5">
+                    <span className="mono text-[11px] text-ink-3">
+                      v{typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '0.4.0'}
+                    </span>
+                    <button
+                      className="btn btn-ghost h-7 text-[11px]"
+                      disabled={updateChecking || updateDownloading}
+                      onClick={() => void checkUpdate(true)}
+                    >
+                      <RefreshCw size={12} className={updateChecking ? 'animate-spin' : undefined} />
+                      检查
+                    </button>
+                    {updateInfo?.available && !updateDownloading && (
+                      <button
+                        className="btn btn-primary h-7 text-[11px]"
+                        onClick={() => void startUpdate()}
+                      >
+                        <Download size={12} />
+                        更新到 {updateInfo.version}
+                      </button>
+                    )}
+                  </div>
+                </Row>
+              </Group>
+
               <Group title="版本">
                 <Row title="ANR Studio" desc="非官方管理工具 · 桌面版">
                   <span className="mono text-[11px] text-ink-3">
@@ -450,22 +516,14 @@ export function SettingsDialog() {
                   <div className="mt-2 flex flex-wrap gap-3">
                     <button
                       className="inline-flex items-center gap-1 text-[11px] text-accent hover:underline"
-                      onClick={() =>
-                        isTauri
-                          ? void call('open_url', { url: 'https://github.com/apex-compute/ANR' })
-                          : window.open('https://github.com/apex-compute/ANR', '_blank')
-                      }
+                      onClick={() => void openExternal('https://github.com/apex-compute/ANR')}
                     >
                       ANR 官方仓库
                       <ExternalLink size={11} />
                     </button>
                     <button
                       className="inline-flex items-center gap-1 text-[11px] text-accent hover:underline"
-                      onClick={() =>
-                        isTauri
-                          ? void call('open_url', { url: 'https://github.com/optiscaler/OptiScaler' })
-                          : window.open('https://github.com/optiscaler/OptiScaler', '_blank')
-                      }
+                      onClick={() => void openExternal('https://github.com/optiscaler/OptiScaler')}
                     >
                       OptiScaler（GPL-3.0）
                       <ExternalLink size={11} />

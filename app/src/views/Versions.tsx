@@ -12,8 +12,8 @@ import {
   Trash2,
   Upload,
 } from 'lucide-react';
-import { clsx, fullDate } from '../lib';
-import { call, errorText, isTauri } from '../lib/ipc';
+import { clsx, fullDate, openExternal } from '../lib';
+import { call, errorText } from '../lib/ipc';
 import { useApp } from '../store';
 import { SectionLabel } from '../components/ui';
 
@@ -26,8 +26,7 @@ function ChangelogPanel({ tag }: { tag: string }) {
 
   const openRelease = (url: string) => {
     if (!url) return;
-    if (isTauri) void call('open_url', { url }).catch(() => undefined);
-    else window.open(url, '_blank');
+    void openExternal(url);
   };
 
   return (

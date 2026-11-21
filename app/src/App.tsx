@@ -15,6 +15,7 @@ import {
   RenameDialog,
 } from './components/Overlays';
 import { TaskCenter, TaskDock } from './components/TaskCenter';
+import { CrashNotice } from './components/CrashNotice';
 import { Overview } from './views/Overview';
 import { Library } from './views/Library';
 import { Versions } from './views/Versions';
@@ -22,7 +23,7 @@ import { Tuning } from './views/Tuning';
 import { Logs } from './views/Logs';
 import { SettingsDialog } from './views/Settings';
 import { useApp, applyTheme } from './store';
-import { isTauri, onCloseRequest, onCover, onTask } from './lib/ipc';
+import { isTauri, onCloseRequest, onCover, onTask, call, reportFrontendError } from './lib/ipc';
 import { applyLocale, type Locale } from './i18n';
 import { installFocusTrap } from './lib/focus';
 
@@ -41,11 +42,42 @@ export default function App() {
     toast,
   } = useApp();
   const locale: Locale = useApp((s) => (s.settings.locale === 'en' ? 'en' : 'zh'));
+  const latestTask = useApp((s) => s.tasks[0]?.title ?? '');
   const [dropping, setDropping] = useState(false);
 
   useEffect(() => {
     void init();
   }, [init]);
+
+  // v0.4 P0-4：崩溃报告里带上「当前视图 / 最近任务」
+  useEffect(() => {
+    if (!isTauri) return;
+    void call('set_crash_context', { view, task: latestTask || null }).catch(() => undefined);
+  }, [view, latestTask]);
+
+  // v0.4 P0-4：window.onerror / unhandledrejection 也落盘，不只靠 ErrorBoundary
+  useEffect(() => {
+    const onError = (e: ErrorEvent) => {
+      const err = e.error as Error | undefined;
+      reportFrontendError(
+        e.message || String(err ?? '未知脚本错误'),
+        `${e.filename}:${e.lineno}:${e.colno}\n${err?.stack ?? ''}`,
+      );
+    };
+    const onReject = (e: PromiseRejectionEvent) => {
+      const reason = e.reason as { message?: string; stack?: string } | undefined;
+      reportFrontendError(
+        reason?.message ?? String(e.reason ?? '未处理的 Promise 拒绝'),
+        reason?.stack ?? '',
+      );
+    };
+    window.addEventListener('error', onError);
+    window.addEventListener('unhandledrejection', onReject);
+    return () => {
+      window.removeEventListener('error', onError);
+      window.removeEventListener('unhandledrejection', onReject);
+    };
+  }, []);
 
   // 语言切换后用 key 重新挂载整棵树：中文是源码原样，其它语言在新树上做字典覆盖
   useEffect(() => {
@@ -168,6 +200,7 @@ export default function App() {
   return (
     <div key={locale} className="flex h-full w-full flex-col overflow-hidden bg-bg">
       <TitleBar />
+      <CrashNotice />
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <Sidebar />
         <div className="flex min-w-0 flex-1 flex-col">

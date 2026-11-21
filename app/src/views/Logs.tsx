@@ -1,5 +1,15 @@
-import { useEffect } from 'react';
-import { AlertTriangle, Bug, Copy, FileArchive, FolderOpen, RefreshCw, ScrollText } from 'lucide-react';
+import { useEffect, useRef } from 'react';
+import {
+  AlertTriangle,
+  Bug,
+  Copy,
+  FileArchive,
+  FolderOpen,
+  Pause,
+  Play,
+  RefreshCw,
+  ScrollText,
+} from 'lucide-react';
 import { clsx } from '../lib';
 import { call, isTauri } from '../lib/ipc';
 import { useApp } from '../store';
@@ -19,8 +29,32 @@ function toneOf(text: string) {
   return 'text-ink-2';
 }
 
+function mb(n: number) {
+  if (n >= 1_048_576) return `${(n / 1_048_576).toFixed(1)} MB`;
+  if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${n} B`;
+}
+
 export function Logs() {
-  const { logGameId, setLogGame, games, toast, logText, logLoading, loadLog, makeDiag } = useApp();
+  const {
+    logGameId,
+    setLogGame,
+    games,
+    toast,
+    logText,
+    logLoading,
+    loadLog,
+    pollLog,
+    makeDiag,
+    logFollow,
+    setLogFollow,
+    logOffset,
+    logSize,
+    logPath,
+  } = useApp();
+  const scrollRef = useRef<HTMLDivElement>(null);
+  // 程序自己滚到底部时不要把「跟随」关掉，只有用户滚动才改
+  const autoScrolling = useRef(false);
 
   const installed = games.filter((g) => g.anr);
   const game = games.find((g) => g.id === logGameId) ?? installed[0];
@@ -29,7 +63,57 @@ export function Logs() {
     if (game && isTauri) void loadLog(game.id);
   }, [game?.id, loadLog]);
 
-  const lines = isTauri ? (logText ? logText.split('\n') : []) : ((game && LOGS[game.id]) ?? DEFAULT_LOG);
+  // v0.4 P1-5：每秒拉一次增量；页面隐藏时停（visibilitychange 时补一次）
+  useEffect(() => {
+    if (!game || !isTauri) return;
+    let alive = true;
+    const tick = () => {
+      if (!alive || document.visibilityState === 'hidden') return;
+      void pollLog(game.id);
+    };
+    const timer = window.setInterval(tick, 1000);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') tick();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [game?.id, pollLog]);
+
+  // 跟随：内容变化后滚到底部
+  useEffect(() => {
+    if (!logFollow) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    autoScrolling.current = true;
+    el.scrollTop = el.scrollHeight;
+    const t = window.setTimeout(() => {
+      autoScrolling.current = false;
+    }, 80);
+    return () => window.clearTimeout(t);
+  }, [logText, logFollow]);
+
+  const onScroll = () => {
+    if (autoScrolling.current) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+    if (atBottom !== logFollow) setLogFollow(atBottom);
+  };
+
+  const lines = isTauri
+    ? logText
+      ? logText.split('\n')
+      : []
+    : ((game && LOGS[game.id]) ?? DEFAULT_LOG);
+
+  const copy = () => {
+    navigator.clipboard?.writeText(lines.join('\n'));
+    toast({ kind: 'info', title: '日志已复制到剪贴板' });
+  };
 
   return (
     <div className="flex h-full">
@@ -72,26 +156,45 @@ export function Logs() {
                 <div className="flex items-center gap-2">
                   <h2 className="truncate text-[13px] font-medium">{game.name}</h2>
                   {!isTauri && <span className="chip h-[17px] text-[10px]">示例日志</span>}
+                  {isTauri && logSize > 0 && (
+                    <span className="mono text-[10px] text-ink-3">
+                      {mb(logOffset)} / {mb(logSize)} · 每秒刷新
+                    </span>
+                  )}
                 </div>
                 <p className="mono mt-0.5 truncate text-[10px] text-ink-3">
-                  {game.anr?.logPath || '暂无日志文件'}
+                  {logPath || game.anr?.logPath || '暂无日志文件'}
                 </p>
               </div>
+              {isTauri && (
+                <button
+                  className={clsx('btn h-7 text-[11px]', logFollow ? 'btn-ghost' : 'btn-primary')}
+                  onClick={() => {
+                    const next = !logFollow;
+                    setLogFollow(next);
+                    if (next) {
+                      const el = scrollRef.current;
+                      if (el) el.scrollTop = el.scrollHeight;
+                    }
+                  }}
+                  title={logFollow ? '暂停自动跟随' : '恢复自动跟随'}
+                >
+                  {logFollow ? <Pause size={12} /> : <Play size={12} />}
+                  {logFollow ? '跟随中' : '已暂停'}
+                </button>
+              )}
               <button
                 className="btn btn-icon h-7 w-7"
                 onClick={() => void loadLog(game.id)}
                 aria-label="重新读取"
-                title="重新读取"
+                title="重新读取（回到日志末尾）"
               >
                 <RefreshCw size={12} className={logLoading ? 'animate-spin' : undefined} />
               </button>
               <button
                 className="btn btn-ghost h-7 text-[11.5px]"
                 disabled={lines.length === 0}
-                onClick={() => {
-                  navigator.clipboard?.writeText(lines.join('\n'));
-                  toast({ kind: 'info', title: '日志已复制到剪贴板' });
-                }}
+                onClick={copy}
               >
                 <Copy size={12} />
                 复制
@@ -105,7 +208,11 @@ export function Logs() {
               </button>
             </div>
 
-            <div className="scroll-thin flex-1 overflow-auto bg-surface-2/25 px-1 py-3">
+            <div
+              ref={scrollRef}
+              onScroll={onScroll}
+              className="scroll-thin flex-1 overflow-auto bg-surface-2/25 px-1 py-3"
+            >
               {lines.length === 0 ? (
                 <p className="px-4 py-8 text-[11.5px] leading-relaxed text-ink-3">
                   {logLoading
@@ -135,10 +242,10 @@ export function Logs() {
             <div className="flex shrink-0 items-center gap-2 border-t border-line px-5 py-3">
               <div className="flex-1">
                 <p className="text-[11.5px] text-ink-2">
-                  提交问题前建议生成诊断包，包含日志、两个 ini 与系统信息
+                  提交问题前建议生成诊断包：日志（已脱敏）+ 两个 ini + 显卡/驱动信息
                 </p>
                 <p className="mt-0.5 text-[10.5px] text-ink-3">
-                  官方要求附带最新的 nr_fg-*.log 与 OptiScaler.log
+                  官方要求附带最新的 nr_fg-*.log 与 OptiScaler.log；包内含 manifest.json 方便核对
                 </p>
               </div>
               <button

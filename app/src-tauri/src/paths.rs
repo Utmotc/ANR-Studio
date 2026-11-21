@@ -66,6 +66,25 @@ pub fn ensure_dir(p: &Path) -> Result<(), String> {
     fs::create_dir_all(p).map_err(|e| format!("创建目录失败 {}：{e}", p.display()))
 }
 
+/// 单元测试用的临时目录。
+///
+/// 0.3.0 的测试写 `std::env::temp_dir()`，在禁止写系统临时目录的环境（受管机器、
+/// 部分沙箱）里会直接 `PermissionDenied`，和代码本身无关。这里统一放到仓库的
+/// `target/test-tmp/` 下：一定可写、随 `cargo clean` 一起清掉，也不会互相打架。
+#[cfg(test)]
+pub fn test_dir(label: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("test-tmp")
+        .join(format!("{label}-{}-{n}", std::process::id()));
+    let _ = fs::remove_dir_all(&p);
+    fs::create_dir_all(&p).expect("创建测试临时目录失败");
+    p
+}
+
 pub fn now_iso() -> String {
     chrono::Local::now().to_rfc3339()
 }

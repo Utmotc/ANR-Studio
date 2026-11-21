@@ -853,9 +853,7 @@ mod tests {
 
     #[test]
     fn complete_part_is_promoted_without_network() {
-        let dir = std::env::temp_dir().join(format!("anr-dl-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let dir = crate::paths::test_dir("installer-dl");
         let dest = dir.join("full.zip");
         let part = part_path(&dest);
         fs::write(&part, b"0123456789").unwrap();
@@ -877,8 +875,7 @@ mod tests {
 
     #[test]
     fn snapshot_round_trips_proxy_and_ini() {
-        let root = std::env::temp_dir().join(format!("anr-snap-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let root = crate::paths::test_dir("installer-snapshot");
         let data = root.join("data");
         let game = root.join("game");
         let provider = inspect::provider_dir(&game).join("dlssg");
@@ -912,9 +909,7 @@ mod tests {
 
     #[test]
     fn old_snapshot_without_metadata_is_not_restored_for_other_game() {
-        let root = std::env::temp_dir().join(format!("anr-snap-old-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
+        let root = crate::paths::test_dir("installer-old-snapshot");
         let zip = root.join("Other Game-20260101-000000.zip");
         let file = File::create(&zip).unwrap();
         let mut zw = zip::ZipWriter::new(file);

@@ -1,4 +1,21 @@
 import type { Game, Health } from './types';
+import { call, isTauri } from './lib/ipc';
+
+/** v0.4 P1-9：所有外链统一走这里。
+ *  桌面端只走 Rust 的 `open_url`（ShellExecuteW，不经过 cmd）；
+ *  浏览器预览（`npm run dev`）没有 Tauri 后端，才退回 window.open。 */
+export async function openExternal(url: string) {
+  if (isTauri) {
+    try {
+      await call('open_url', { url });
+      return;
+    } catch {
+      /* 后端拒绝（非 http(s)）时不再退回浏览器 */
+      return;
+    }
+  }
+  window.open(url, '_blank', 'noopener,noreferrer');
+}
 
 export const clsx = (...parts: (string | false | null | undefined)[]) =>
   parts.filter(Boolean).join(' ');

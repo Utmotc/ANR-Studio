@@ -126,8 +126,7 @@ mod tests {
 
     #[test]
     fn parses_package_json() {
-        let dir = std::env::temp_dir().join(format!("anr-cat-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = crate::paths::test_dir("catalog-parse");
         let p = dir.join("nr_fg_package.json");
         let sha = "a".repeat(64);
         fs::write(&p, format!("{{\"provider_sha256\":\"{sha}\",\"tag\":\"FG-V.B18\"}}")).unwrap();
@@ -139,8 +138,7 @@ mod tests {
 
     #[test]
     fn rejects_short_hash() {
-        let dir = std::env::temp_dir().join(format!("anr-cat-bad-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = crate::paths::test_dir("catalog-bad");
         let p = dir.join("nr_fg_package.json");
         fs::write(&p, "{\"provider_sha256\":\"abc\"}").unwrap();
         assert!(from_package_json(&p).is_none());

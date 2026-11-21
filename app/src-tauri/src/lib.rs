@@ -1,11 +1,13 @@
 mod catalog;
 mod covers;
 mod changelog;
+mod crash;
 mod health;
 mod ini;
 mod jobs;
 mod net;
 mod precheck;
+mod sysinfo;
 mod tuning;
 mod inspect;
 mod installer;
@@ -26,6 +28,7 @@ use std::time::{Duration, Instant};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_updater::UpdaterExt;
 
 use ini::IniDoc;
 use model::{Game, NrFgConfig, ProgressEvent, Settings, SnapshotInfo, Version};
@@ -763,6 +766,7 @@ fn do_install(
     tag: &str,
     mirror: &str,
     force: bool,
+    proxy: Option<&str>,
 ) -> Result<PathBuf, String> {
     emit(app, task, "安装", name, "前置检查", 0.04, "running");
 
@@ -797,8 +801,7 @@ fn do_install(
     }
 
     emit(app, task, "安装", name, "执行安装脚本", 0.9, "running");
-    installer::run_install(&pkg, dir, proxy_hint(dir), &|| canceled(task))
-        .map_err(script_error_text)?;
+    installer::run_install(&pkg, dir, proxy, &|| canceled(task)).map_err(script_error_text)?;
 
     emit(app, task, "安装", name, "后置校验", 0.97, "running");
     if !inspect::provider_dll(dir).exists() {
@@ -870,7 +873,7 @@ async fn install(
         };
         match do_install(
             &app2, &task2, &name2, &dir, &cache, &kind, &target, &mirror,
-            force.unwrap_or(false),
+            force.unwrap_or(false), proxy_hint(&dir),
         ) {
             Ok(pkg) => Ok(pkg),
             Err(e) => {
@@ -1191,6 +1194,324 @@ async fn make_diag(app: AppHandle, id: String) -> Result<String, String> {
         Ok(out.to_string_lossy().to_string())
     })
     .await
+}
+
+/// P1-5：增量读取日志。前端每 1 秒带上一轮的 `offset` 与 `path` 来拉新内容。
+#[tauri::command]
+async fn read_log_since(
+    app: AppHandle,
+    id: String,
+    offset: Option<u64>,
+    path: Option<String>,
+) -> Result<logs::LogChunk, String> {
+    run_blocking(move || {
+        let st = app.state::<AppState>();
+        let game = ensure_game(st.inner(), &id)?;
+        logs::read_since(Path::new(&game.dir), offset, path.as_deref())
+    })
+    .await
+}
+
+/// P0-4：还没处理的崩溃报告（新的在前）。启动时与打开「关于」时都可以问一次。
+#[tauri::command]
+fn crash_list(state: State<'_, AppState>) -> Vec<crash::CrashReport> {
+    crash::list_pending(&state.data_dir)
+}
+
+/// 用户「忽略」后写 `.ack`，下次启动不再提示。
+#[tauri::command]
+fn crash_ack(state: State<'_, AppState>, paths: Vec<String>) -> Result<(), String> {
+    crash::ack(&state.data_dir, &paths)
+}
+
+/// 前端渲染异常 / window.onerror / unhandledrejection 也落一份同样的报告。
+#[tauri::command]
+fn report_frontend_error(
+    state: State<'_, AppState>,
+    message: String,
+    detail: String,
+) -> Result<String, String> {
+    crash::report(&state.data_dir, "frontend", &message, &detail)
+        .map(|p| p.to_string_lossy().to_string())
+        .ok_or_else(|| "写入崩溃报告失败".to_string())
+}
+
+/// 让崩溃报告带上「当前视图 / 最近任务」，排查时能直接定位到操作。
+#[tauri::command]
+fn set_crash_context(view: String, task: Option<String>) {
+    crash::set_context(&view, task.as_deref());
+}
+
+/// P0-4：崩溃诊断包（所有崩溃报告 + 系统信息 + manifest）。
+#[tauri::command]
+async fn make_crash_diag(app: AppHandle) -> Result<String, String> {
+    run_blocking(move || {
+        let st = app.state::<AppState>();
+        let out = logs::crash_bundle(&st.data_dir)?;
+        Ok(out.to_string_lossy().to_string())
+    })
+    .await
+}
+
+/// P1-8：手动指定代理 DLL。改动代理名等于一次完整重装：
+/// 确认未运行 → 快照 → 用目标名字重跑官方脚本 → 校验 `nr_fg_install.json`。
+#[tauri::command]
+async fn set_proxy(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    dll: String,
+    force: Option<bool>,
+) -> Result<(), String> {
+    const ALLOWED: [&str; 3] = ["dxgi.dll", "winmm.dll", "version.dll"];
+    let dll = dll.trim().to_ascii_lowercase();
+    if !ALLOWED.contains(&dll.as_str()) {
+        return Err("代理 DLL 只支持 dxgi.dll / winmm.dll / version.dll".into());
+    }
+    let game = ensure_game(state.inner(), &id)?;
+    require_confirmation(&game, force)?;
+    let Some(anr) = game.anr.clone() else {
+        return Err("这个游戏没有安装 ANR".into());
+    };
+    if anr.proxy.eq_ignore_ascii_case(&dll) {
+        return Ok(());
+    }
+    ensure_not_running(&game, "更换代理 DLL")?;
+
+    let settings = state.settings.lock().unwrap().clone();
+    let cache = PathBuf::from(&settings.cache_dir);
+    let mirror = settings.mirror.clone();
+    let kind = anr.kind.clone();
+    let tag = if anr.version != "未知" && !anr.version.is_empty() {
+        anr.version.clone()
+    } else if !settings.default_version.trim().is_empty() {
+        settings.default_version.trim().to_string()
+    } else {
+        get_releases(state.inner(), false)?
+            .first()
+            .map(|r| r.tag.clone())
+            .ok_or("无法获取最新版本")?
+    };
+    let dir = PathBuf::from(&game.dir);
+    let exe = game.exe.clone();
+    let name = game.name.clone();
+    let data_dir = state.data_dir.clone();
+    let keep_snapshot = settings.keep_snapshot;
+    let limit = settings.concurrency;
+    let task = format!("task-{}", TASK_SEQ.fetch_add(1, Ordering::Relaxed));
+    let app2 = app.clone();
+    let task2 = task.clone();
+    let name2 = name.clone();
+    let dll2 = dll.clone();
+    let tag2 = tag.clone();
+    let kind2 = kind.clone();
+
+    let result = run_blocking(move || -> Result<PathBuf, String> {
+        let _ticket = task_gate(&app2, &task2, "更换代理 DLL", &name2, limit)?;
+        if scan::game_running(&dir, &exe) {
+            return Err("游戏正在运行，请先退出游戏再更换代理 DLL".into());
+        }
+        let snap: Option<PathBuf> = if keep_snapshot {
+            emit(&app2, &task2, "更换代理 DLL", &name2, "生成快照", 0.05, "running");
+            installer::snapshot(&data_dir, &dir, &name2).ok()
+        } else {
+            None
+        };
+        let fail = |msg: String| -> String {
+            let (msg, rolled) = rollback_if_possible(snap.as_deref(), &dir, msg);
+            failure_message(msg, snap.as_deref(), rolled)
+        };
+        emit(&app2, &task2, "更换代理 DLL", &name2, "准备安装包", 0.1, "running");
+        let pkg = installer::ensure_package(
+            &cache,
+            &tag2,
+            &kind2,
+            &mirror,
+            |stage, p| emit(&app2, &task2, "更换代理 DLL", &name2, stage, 0.1 + p * 0.7, "running"),
+            &|| canceled(&task2),
+        )
+        .map_err(|e| fail(e))?;
+        if canceled(&task2) {
+            return Err("已取消".into());
+        }
+        emit(&app2, &task2, "更换代理 DLL", &name2, "重新安装", 0.9, "running");
+        installer::run_install(&pkg, &dir, Some(&dll2), &|| canceled(&task2))
+            .map_err(|e| fail(script_error_text(e)))?;
+
+        // 后置校验：安装记录里的 proxy 必须真的变成用户选的名字
+        let rec = fs::read_to_string(inspect::record_path(&dir)).unwrap_or_default();
+        let got = serde_json::from_str::<serde_json::Value>(&rec)
+            .ok()
+            .and_then(|v| v.get("proxy").and_then(|x| x.as_str()).map(|s| s.to_string()));
+        if got.as_deref().map(|g| !g.eq_ignore_ascii_case(&dll2)).unwrap_or(true) {
+            return Err(fail(format!(
+                "安装脚本执行完成，但安装记录里的代理仍是 {}，不是 {dll2}",
+                got.unwrap_or_else(|| "空".into())
+            )));
+        }
+        emit(&app2, &task2, "更换代理 DLL", &name2, "已完成", 1.0, "done");
+        Ok(pkg)
+    })
+    .await;
+
+    match result {
+        Ok(path) => {
+            record_fingerprint(state.inner(), &path, &tag);
+            let _ = rescan(state.inner());
+            Ok(())
+        }
+        Err(full) => {
+            let _ = rescan(state.inner());
+            emit(
+                &app,
+                &task,
+                "更换代理 DLL",
+                &name,
+                &failure_ui_text(&full),
+                1.0,
+                err_status(&full),
+            );
+            Err(full)
+        }
+    }
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct UpdateCheck {
+    current: String,
+    available: bool,
+    version: String,
+    notes: String,
+}
+
+fn update_error_text(e: impl std::fmt::Display) -> String {
+    let raw = e.to_string();
+    let lower = raw.to_ascii_lowercase();
+    if raw.contains("No updater endpoints") {
+        return "没有配置更新源（tauri.conf.json → plugins.updater.endpoints）".into();
+    }
+    // 还没发布 latest.json 时 GitHub 会 404，插件把它报成「release JSON 无效」。
+    // 这不是故障，也不该吓用户：说明清楚「还没上传」即可。
+    if lower.contains("valid release json")
+        || lower.contains("could not fetch")
+        || lower.contains("status code 404")
+        || lower.contains("http 404")
+    {
+        return "还没有可用的更新信息：GitHub Releases 上尚未发布 latest.json".into();
+    }
+    if raw.contains("error sending request")
+        || raw.contains("dns")
+        || raw.contains("connect")
+        || raw.contains("timed out")
+    {
+        return format!("更新检查失败：网络不可达（{raw}）");
+    }
+    format!("更新检查失败：{raw}")
+}
+
+const UPDATE_MANIFEST: &str =
+    "https://github.com/Utmotc/ANR-Studio/releases/latest/download/latest.json";
+
+/// 更新源听「下载源」设置：镜像模式走 gh-proxy，直连/自动走 GitHub 本体。
+/// 验签用的是内置公钥，跟走哪条线路无关，所以换源不影响安全性。
+fn updater_for(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
+    let mirror = app.state::<AppState>().settings.lock().unwrap().mirror.clone();
+    let mut builder = app
+        .updater_builder()
+        .timeout(Duration::from_secs(30));
+    if mirror == "mirror" {
+        let url: tauri::Url = format!("https://gh-proxy.com/{UPDATE_MANIFEST}")
+            .parse()
+            .map_err(|e| format!("更新源地址无效：{e}"))?;
+        builder = builder
+            .endpoints(vec![url])
+            .map_err(|e| format!("更新源配置失败：{e}"))?;
+    }
+    builder.build().map_err(update_error_text)
+}
+
+/// P1-3：检查更新。离线/未配置时返回 Err，前端静默处理（手动检查才提示）。
+#[tauri::command]
+async fn check_update(app: AppHandle) -> Result<UpdateCheck, String> {
+    let updater = updater_for(&app)?;
+    let found = updater.check().await.map_err(update_error_text)?;
+    Ok(match found {
+        Some(u) => UpdateCheck {
+            current: env!("CARGO_PKG_VERSION").to_string(),
+            available: true,
+            version: u.version.clone(),
+            notes: u.body.clone().unwrap_or_default(),
+        },
+        None => UpdateCheck {
+            current: env!("CARGO_PKG_VERSION").to_string(),
+            available: false,
+            version: String::new(),
+            notes: String::new(),
+        },
+    })
+}
+
+/// P1-3：下载 + 验签 + 安装更新；进度走任务中心的事件通道，完成后重启。
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    let updater = updater_for(&app)?;
+    let update = updater
+        .check()
+        .await
+        .map_err(update_error_text)?
+        .ok_or_else(|| "已经是最新版本".to_string())?;
+    let version = update.version.clone();
+    let task = format!("task-{}", TASK_SEQ.fetch_add(1, Ordering::Relaxed));
+    emit(&app, &task, "更新", &version, "正在下载更新包", 0.02, "running");
+
+    let app_dl = app.clone();
+    let task_dl = task.clone();
+    let version_dl = version.clone();
+    let app_inst = app.clone();
+    let task_inst = task.clone();
+    let version_inst = version.clone();
+    let mut last_reported = 0u32;
+    update
+        .download_and_install(
+            move |chunk: usize, total: Option<u64>| {
+                if let Some(total) = total {
+                    if total > 0 {
+                        let done = chunk as f64 / total as f64;
+                        // 每 2% 报一次，别把任务事件刷爆
+                        let pct = (done * 100.0) as u32;
+                        if pct >= last_reported + 2 {
+                            last_reported = pct;
+                            emit(
+                                &app_dl,
+                                &task_dl,
+                                "更新",
+                                &version_dl,
+                                &format!("下载中 {pct}%"),
+                                0.02 + done * 0.88,
+                                "running",
+                            );
+                        }
+                    }
+                }
+            },
+            move || emit(&app_inst, &task_inst, "更新", &version_inst, "正在安装更新", 0.95, "running"),
+        )
+        .await
+        .map_err(|e| {
+            let msg = update_error_text(e);
+            emit(&app, &task, "更新", &version, &msg, 1.0, "error");
+            msg
+        })?;
+
+    emit(&app, &task, "更新", &version, "更新已就绪，即将重启", 1.0, "done");
+    std::thread::sleep(Duration::from_millis(400));
+    app.restart();
+}
+
+#[tauri::command]
+fn restart_app(app: AppHandle) {
+    app.restart();
 }
 
 /// P0-1：列出这个游戏的快照（新快照按 gameId 匹配，旧快照按文件名前缀兜底）
@@ -1539,16 +1860,66 @@ fn close_window(
     Ok(())
 }
 
+#[cfg(windows)]
+mod shell {
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        pub fn ShellExecuteW(
+            hwnd: *mut core::ffi::c_void,
+            operation: *const u16,
+            file: *const u16,
+            parameters: *const u16,
+            directory: *const u16,
+            show: i32,
+        ) -> isize;
+    }
+}
+
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// 只放行 http(s)，且不接受控制字符（防止用换行拼接别的参数）。
+fn allowed_url(url: &str) -> bool {
+    (url.starts_with("https://") || url.starts_with("http://"))
+        && !url.chars().any(|c| c.is_control())
+}
+
+/// P1-9：外链不再拼进 `cmd /C start "" <url>`。
+///
+/// URL 里带 `&` 会被 cmd 当成命令分隔符（`https://a.com/?x=1&y=2` 会多执行一段），
+/// 这里直接调 `ShellExecuteW`，不经过 shell 解析；并且只放行 http(s)。
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
-    if !url.starts_with("https://") && !url.starts_with("http://") {
-        return Err("只允许打开 http(s) 链接".into());
+    let url = url.trim();
+    if !allowed_url(url) {
+        return Err("只允许打开 http(s) 链接，且不能包含控制字符".into());
     }
-    let mut cmd = Command::new("cmd");
-    cmd.args(["/C", "start", "", &url]);
-    scan::hidden(&mut cmd);
-    cmd.spawn().map_err(|e| format!("打开链接失败：{e}"))?;
-    Ok(())
+    #[cfg(windows)]
+    {
+        let op = wide("open");
+        let target = wide(url);
+        // 返回值 > 32 才算成功（ShellExecute 的历史约定）
+        let code = unsafe {
+            shell::ShellExecuteW(
+                std::ptr::null_mut(),
+                op.as_ptr(),
+                target.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+            )
+        };
+        if code <= 32 {
+            return Err(format!("打开链接失败（ShellExecute 返回 {code}）"));
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = url;
+        Err("只支持 Windows".into())
+    }
 }
 
 #[tauri::command]
@@ -1569,9 +1940,44 @@ fn app_paths(state: State<'_, AppState>) -> serde_json::Value {
     })
 }
 
+/// 与 `tauri.conf.json` 的 `identifier` 保持一致；用于在 Tauri 初始化之前推算数据目录。
+const APP_ID: &str = "app.anrstudio.desktop";
+
+/// 提前推算数据目录（不依赖 Tauri 的初始化）。
+///
+/// Tauri 会**先创建窗口/WebView，再调用 setup**（`tauri::app::setup`）。如果 WebView2
+/// 初始化失败，setup 根本不会执行——而「双击没反应」正是这种场景。所以 panic hook
+/// 必须在进入事件循环之前就挂上。
+fn pre_setup_data_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        let base = std::env::var_os("LOCALAPPDATA")?;
+        Some(PathBuf::from(base).join(APP_ID).join("anr-studio"))
+    }
+    #[cfg(not(windows))]
+    {
+        let base = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
+        Some(base.join(APP_ID).join("anr-studio"))
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 越早越好：窗口创建失败也能落一份崩溃报告
+    if let Some(data) = pre_setup_data_dir() {
+        let _ = fs::create_dir_all(&data);
+        crash::install_hook(&data);
+    }
+
     tauri::Builder::default()
+        // 单实例插件必须最先注册：第二个实例在初始化窗口之前就应该退出
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // 托盘隐藏状态下再双击一次，应把已有窗口显示出来
+            show_main(app);
+        }))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let data = app
                 .path()
@@ -1579,8 +1985,18 @@ pub fn run() {
                 .unwrap_or_else(|_| PathBuf::from("."))
                 .join("anr-studio");
             let _ = fs::create_dir_all(&data);
+            // 越早挂越好：之后任何线程 panic 都能落盘
+            crash::install_hook(&data);
             let mut settings = P::load_settings(&data);
             let catalog = P::load_catalog(&data);
+
+            #[cfg(debug_assertions)]
+            if std::env::var("ANR_CRASH_TEST").is_ok() {
+                std::thread::spawn(|| {
+                    std::thread::sleep(Duration::from_secs(2));
+                    panic!("ANR_CRASH_TEST：手动触发的崩溃测试");
+                });
+            }
 
             // 版本变化时刷新一次系统图标缓存，避免升级后桌面快捷方式仍显示旧图标
             if settings.last_version != env!("CARGO_PKG_VERSION") {
@@ -1674,7 +2090,17 @@ pub fn run() {
             write_config,
             repair_install,
             get_log,
+            read_log_since,
             make_diag,
+            crash_list,
+            crash_ack,
+            report_frontend_error,
+            set_crash_context,
+            make_crash_diag,
+            set_proxy,
+            check_update,
+            install_update,
+            restart_app,
             list_snapshots,
             restore_snapshot,
             prefetch,
@@ -1708,4 +2134,29 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running ANR Studio");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_http_urls_are_allowed() {
+        assert!(allowed_url("https://a.com/?x=1&y=2"));
+        assert!(allowed_url("http://a.com"));
+        assert!(!allowed_url("file:///C:/Windows/System32/calc.exe"));
+        assert!(!allowed_url("javascript:alert(1)"));
+        assert!(!allowed_url("https://a.com/\ncalc.exe"));
+    }
+
+    #[test]
+    fn update_errors_are_explained_in_chinese() {
+        // GitHub 还没有 latest.json 时插件会报这句，不该显示成「检查失败」
+        let missing = update_error_text("Could not fetch a valid release JSON from the remote");
+        assert!(missing.contains("尚未发布 latest.json"), "{missing}");
+        assert!(!missing.contains("检查失败"), "{missing}");
+        // 断网仍然是失败，但要指出是网络
+        let offline = update_error_text("error sending request: dns error");
+        assert!(offline.contains("网络不可达"), "{offline}");
+    }
 }

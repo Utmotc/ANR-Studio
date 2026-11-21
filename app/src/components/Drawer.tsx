@@ -29,6 +29,13 @@ const PATH_OPTIONS = [
   { value: 'portable-xmx', label: 'portable-xmx' },
 ];
 
+/** v0.4 P1-8：代理 DLL 三选一。顺序按「通用 → Vulkan/冲突 → 兜底」排 */
+const PROXY_OPTIONS = [
+  { value: 'dxgi.dll', label: 'dxgi', hint: '通用，绝大多数游戏选这个' },
+  { value: 'winmm.dll', label: 'winmm', hint: 'Vulkan 游戏，或目录里已有别人的 dxgi 代理' },
+  { value: 'version.dll', label: 'version', hint: '前两个都冲突时用它兜底' },
+] as const;
+
 export function Drawer() {
   const {
     drawerId,
@@ -40,6 +47,7 @@ export function Drawer() {
     switchVersion,
     toggleEnabled,
     setFgReplacement,
+    setProxy,
     updateConfig,
     setView,
     setLogGame,
@@ -281,9 +289,38 @@ export function Drawer() {
                 <MetaRow label="安装方式">
                   {anr.kind === 'addon' ? '插件（沿用已有 OptiScaler）' : '全量（含 OptiScaler）'}
                 </MetaRow>
-                <MetaRow label="代理 DLL" mono>
-                  {anr.proxy}
-                </MetaRow>
+                <div className="flex items-start gap-3 border-b border-line-soft py-2.5">
+                  <span className="w-[92px] shrink-0 pt-[3px] text-[11px] text-ink-3">代理 DLL</span>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {PROXY_OPTIONS.map((p) => {
+                        const active = anr.proxy === p.value;
+                        return (
+                          <button
+                            key={p.value}
+                            disabled={game.running}
+                            onClick={() => void setProxy(game.id, p.value)}
+                            title={p.hint}
+                            className={clsx(
+                              'mono rounded-[6px] border px-2 py-1 text-[11px] transition-colors',
+                              active
+                                ? 'border-accent-line bg-accent-soft font-medium text-accent'
+                                : 'border-line text-ink-3 hover:border-surface-3 hover:text-ink',
+                              game.running && 'cursor-not-allowed opacity-50',
+                            )}
+                          >
+                            {p.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <p className="mt-1.5 text-[10.5px] leading-relaxed text-ink-3">
+                      {game.running
+                        ? '游戏运行中不能更换代理名，请先退出游戏。'
+                        : `${PROXY_OPTIONS.find((p) => p.value === anr.proxy)?.hint ?? '自定义代理名'}；切换会重装一次，失败可回滚。`}
+                    </p>
+                  </div>
+                </div>
                 <MetaRow label="来源">{SOURCE_LABEL[game.source]}</MetaRow>
                 <MetaRow label="安装时间">{fullDate(anr.installedAt)}</MetaRow>
                 <MetaRow label="版本指纹" mono>

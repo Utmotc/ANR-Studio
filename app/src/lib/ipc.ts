@@ -40,3 +40,9 @@ export function onCloseRequest(cb: () => void): Promise<UnlistenFn> {
   if (!isTauri) return Promise.resolve(() => {});
   return listen('close-requested', () => cb());
 }
+
+/** v0.4 P0-4：前端异常也落到 crash/，让「闪退没有信息」不再只指后端 panic。 */
+export function reportFrontendError(message: string, detail: string) {
+  if (!isTauri) return;
+  void call('report_frontend_error', { message, detail }).catch(() => undefined);
+}

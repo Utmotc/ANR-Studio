@@ -119,6 +119,8 @@ export interface Settings {
   locale: 'zh' | 'en';
   /** 游戏库视图，启动时恢复 */
   layout: 'grid' | 'list';
+  /** v0.4 自动更新：auto 自动下载 / prompt 仅提示 / off 不检查 */
+  updateMode: 'auto' | 'prompt' | 'off';
   manualGames?: string[];
   renames?: Record<string, string>;
   hiddenGames?: string[];
@@ -188,4 +190,34 @@ export interface FailureInfo {
   rolledBack: boolean;
   canRollback: boolean;
   retry: () => Promise<void>;
+}
+
+/** v0.4 P0-4：崩溃报告 */
+export interface CrashReport {
+  path: string;
+  fileName: string;
+  createdAt: string;
+  kind: string;
+  message: string;
+  location: string;
+  sizeBytes: number;
+}
+
+/** v0.4 P1-5：增量日志块 */
+export interface LogChunk {
+  text: string;
+  /** 下一次应带的 offset（字节） */
+  next: number;
+  size: number;
+  /** 文件被截断 / 轮转 / 目标日志换了：前端应清空重来 */
+  reset: boolean;
+  path: string | null;
+}
+
+/** v0.4 P1-3：更新检查结果 */
+export interface UpdateCheck {
+  current: string;
+  available: boolean;
+  version: string;
+  notes: string;
 }

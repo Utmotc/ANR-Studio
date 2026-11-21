@@ -21,3 +21,8 @@ desktop.ini
 # ---- 本地环境 ----
 .env
 .env.local
+
+# 本地生成的更新签名密钥（只放 CI secrets，绝不提交）
+.tauri-keys/
+# CI 生成的可选 Authenticode 覆盖配置（含绝对路径）
+app/src-tauri/tauri.signing.conf.json
