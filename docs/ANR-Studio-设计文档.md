@@ -1469,3 +1469,21 @@ setup 根本不会跑，只有提前安装的 hook 才能留下报告。这也�
 验证：`cargo test --lib` **55 passed**；重建 NSIS 成功，生成的安装包带新卸载器与更新包 `.sig`。
 
 > 注：已经安装在 `D:\SoftWare\ANR Studio` 的旧副本，用新安装包覆盖安装后会换上新的 `uninstall.exe`；之后卸载即可正常结束进程。旧目录不会自动迁移，想换默认目录请在安装向导里改。
+
+### T.13 0.4.1（诊断包脱敏补丁）
+
+0.4.0 发布后 CI 在 Windows runner 上跑 `cargo test --lib` 时，诊断包用例失败了。原因不是环境：测试工作区在 `D:\a\...`，不经过 `C:\Users`，所以 system.txt 里自然没有 `%USERPROFILE%`；顺着这条线还发现真正的问题——**JSON 转义路径识别不了**：
+
+- `nr_fg_install.json` 与 system.txt 里的 `state_json` 都是 `serde_json` 生成的，路径是 `C:\\Users\\name`（双反斜杠）；
+- 旧脱敏只处理单分隔符 `\Users\`，遇到 `\\Users\\` 时 `Users` 后的第一个字符就是分隔符，段长为 0，整段被跳过；
+- 结果：如果游戏装在用户目录下，诊断包会带出完整用户名，违背「包内不出现用户名」的验收。
+
+修法（`sysinfo::sanitize`）：
+
+- `Users` 后面允许连续多个分隔符（JSON 转义的双反斜杠、正反斜杠混用都能处理）；
+- 盘符前缀识别改为「向前跳过所有分隔符，再看前一位是否 `:`」；
+- 新增 JSON 路径用例，诊断包用例不再要求工作区在用户目录下。
+
+验证：`cargo test --lib` **55 passed**；GitHub Actions `ci` 成功（run 44917860177）。
+
+0.4.1 重新构建并发布：`ANR-Studio_0.4.1_x64-setup.exe` + `.sig` + `latest.json` + `SHA256SUMS.txt`。已安装 0.4.0 的应用可以直接在「设置 → 关于」检查并更新到 0.4.1，同时换上修复后的卸载器。
