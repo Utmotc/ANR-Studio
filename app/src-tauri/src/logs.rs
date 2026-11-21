@@ -421,7 +421,13 @@ mod tests {
         .unwrap();
         fs::write(game.join("OptiScaler.ini"), "[FrameGen]\nEnabled=true\n").unwrap();
 
-        let zip_path = diag_bundle(&data, &game, "Test Game", r#"{"state":"ok"}"#).unwrap();
+        let zip_path = diag_bundle(
+            &data,
+            &game,
+            "Test Game",
+            r#"{"state":"ok","path":"C:\\Users\\SomeOne\\AppData\\Local\\x"}"#,
+        )
+        .unwrap();
         let file = File::open(&zip_path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
 

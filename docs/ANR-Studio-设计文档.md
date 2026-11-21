@@ -1391,7 +1391,7 @@ setup 根本不会跑，只有提前安装的 hook 才能留下报告。这也�
 ### T.4 诊断包升级（P1-7）
 
 - 新增 `sysinfo.rs`：PowerShell `Get-CimInstance` 采集 GPU（型号 / 驱动版本 / 驱动日期 / 显存 / 刷新率）、CPU、内存、OS build，以及游戏 exe 的版本资源与大小；WMI 不可用时降级为「未采集到」并写明原因，不让整个诊断包失败。
-- 脱敏（只处理 `ini/json/log/txt`，二进制原样）：`C:\Users\<name>` / `D:/Users/<name>` → `%USERPROFILE%`；当前用户名（≥3 字符）出现的位置 → `%USERNAME%`；17/16 位 SteamID64 中间打码。扫描是单遍的（先找 `users` 候选再跳过），几十 MB 日志也不会退化成 O(n²)。
+- 脱敏（只处理 `ini/json/log/txt`，二进制原样）：`C:\Users\<name>` / `D:/Users/<name>` → `%USERPROFILE%`；**JSON 转义出来的 `C:\\Users\\<name>` 也能识别**；当前用户名（≥3 字符）出现的位置 → `%USERNAME%`；17/16 位 SteamID64 中间打码。扫描是单遍的（先找 `users` 候选再跳过），几十 MB 日志也不会退化成 O(n²)。
 - 诊断包新增 `manifest.json`：工具版本、生成时间、脱敏规则版本、每个文件的字节数与 SHA256（哈希的是脱敏后的内容）。
 - 生成后把路径复制到剪贴板，toast 直接给出路径。
 
@@ -1426,7 +1426,7 @@ setup 根本不会跑，只有提前安装的 hook 才能留下报告。这也�
 
 ### T.9 验证
 
-- `cargo test --lib`：**54 passed / 0 failed / 1 ignored**（新增 crash 4、logs 5、sysinfo 5、lib 2；诊断包用例覆盖脱敏与 manifest 哈希；同时把旧的 `%TEMP%` 测试目录换成仓库内 `target/test-tmp`，受限环境不再误报）
+- `cargo test --lib`：**55 passed / 0 failed / 1 ignored**（新增 crash 4、logs 5、sysinfo 6、lib 2；诊断包用例覆盖脱敏与 manifest 哈希；同时把旧的 `%TEMP%` 测试目录换成仓库内 `target/test-tmp`，受限环境不再误报）
 - `cargo check --all-targets`：0 warning
 - `node node_modules/typescript/bin/tsc --noEmit` 通过；`vite build` 通过（单文件 537 KB）
 - 调试构建 `tauri build --debug --bundles nsis`：配置解析通过，产出 NSIS + `.sig`（更新私钥本地临时注入）
@@ -1466,6 +1466,6 @@ setup 根本不会跑，只有提前安装的 hook 才能留下报告。这也�
 - 安装完成后「运行 ANR Studio」不再默认勾选（`MUI_FINISHPAGE_RUN_NOTCHECKED`）：避免提权安装时把应用也以管理员权限拉起来。
 - 更新检查遇到 404（`latest.json` 还没上传）映射为「还没有可用的更新信息：GitHub Releases 上尚未发布 latest.json」，不再显示成故障。
 
-验证：`cargo test --lib` **54 passed**；重建 NSIS 成功，生成的安装包带新卸载器与更新包 `.sig`。
+验证：`cargo test --lib` **55 passed**；重建 NSIS 成功，生成的安装包带新卸载器与更新包 `.sig`。
 
 > 注：已经安装在 `D:\SoftWare\ANR Studio` 的旧副本，用新安装包覆盖安装后会换上新的 `uninstall.exe`；之后卸载即可正常结束进程。旧目录不会自动迁移，想换默认目录请在安装向导里改。

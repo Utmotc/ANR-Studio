@@ -342,38 +342,41 @@ pub fn sanitize(text: &str) -> String {
             out.push_str(&text[i..]);
             break;
         };
-        // 「users」前必须是分隔符，后面必须跟分隔符
+        // 「users」前必须是分隔符；后面可能有一个或多个分隔符
+        // （JSON 里的路径是反斜杠转义的，会出现 `C:\\Users\\name`）
         let before_ok = rel == 0 || is_sep(bytes[rel - 1]);
         let after = rel + 5;
-        if before_ok && after < bytes.len() && is_sep(bytes[after]) {
-            let seg_start = after + 1;
-            let mut seg_end = seg_start;
-            while seg_end < bytes.len() && !is_sep(bytes[seg_end]) {
-                seg_end += utf8_len_at(bytes, seg_end);
+        if before_ok && after < bytes.len() {
+            let mut name_start = after;
+            while name_start < bytes.len() && is_sep(bytes[name_start]) {
+                name_start += 1;
             }
-            if seg_end > seg_start {
-                // 尽量连前面的盘符一起吞掉：C:\Users\x → %USERPROFILE%
-                let mut cut = rel;
-                let mut full = false;
-                if rel >= 3
-                    && bytes[rel - 2] == b':'
-                    && is_sep(bytes[rel - 1])
-                    && bytes[rel - 3].is_ascii_alphabetic()
-                {
-                    cut = rel - 3;
-                    full = true;
+            if name_start > after && name_start < bytes.len() {
+                let mut seg_end = name_start;
+                while seg_end < bytes.len() && !is_sep(bytes[seg_end]) {
+                    seg_end += utf8_len_at(bytes, seg_end);
                 }
-                out.push_str(&text[i..cut]);
-                if full {
-                    out.push_str("%USERPROFILE%");
-                } else {
-                    out.push_str("Users");
-                    out.push(std::path::MAIN_SEPARATOR);
-                    out.push_str("%USERNAME%");
+                if seg_end > name_start {
+                    // 盘符前缀：C:\Users / C:/Users / C:\\Users（JSON 转义）
+                    let mut k = rel;
+                    while k > 0 && is_sep(bytes[k - 1]) {
+                        k -= 1;
+                    }
+                    let full =
+                        k >= 2 && bytes[k - 1] == b':' && bytes[k - 2].is_ascii_alphabetic();
+                    let cut = if full { k - 2 } else { rel };
+                    out.push_str(&text[i..cut]);
+                    if full {
+                        out.push_str("%USERPROFILE%");
+                    } else {
+                        out.push_str("Users");
+                        out.push(std::path::MAIN_SEPARATOR);
+                        out.push_str("%USERNAME%");
+                    }
+                    // seg 已整体替换；分隔符留给下一轮复制
+                    i = seg_end;
+                    continue;
                 }
-                // seg 已整体替换；分隔符留给下一轮复制
-                i = seg_end;
-                continue;
             }
         }
         // 不是用户目录（例如 "Users" 出现在说明文本里）：原样复制到词尾，跳过它
@@ -448,6 +451,14 @@ mod tests {
         assert!(s.contains("7656***********78"), "{s}");
         assert!(s.contains("fps=120"), "{s}");
         assert!(s.contains("size=12345"), "{s}");
+    }
+
+    #[test]
+    fn masks_json_escaped_paths() {
+        // 诊断包里的 nr_fg_install.json / system.txt 会带反斜杠转义
+        let s = sanitize(r#"{"path":"C:\\Users\\SomeOne\\AppData\\Local"}"#);
+        assert!(!s.contains("SomeOne"), "{s}");
+        assert!(s.contains("%USERPROFILE%"), "{s}");
     }
 
     #[test]
