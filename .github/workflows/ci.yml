@@ -1,0 +1,41 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: app
+
+      - name: TypeScript
+        run: node node_modules/typescript/bin/tsc --noEmit
+        working-directory: app
+
+      - name: Vite build
+        run: node node_modules/vite/bin/vite.js build
+        working-directory: app
+
+      - name: Rust tests
+        run: cargo test --lib
+        working-directory: app/src-tauri

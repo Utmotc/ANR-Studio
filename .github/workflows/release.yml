@@ -1,0 +1,108 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要构建并发布的标签（例如 v0.4.0）'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: app
+
+      - name: Require updater signing key
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+            Write-Error '缺少 TAURI_SIGNING_PRIVATE_KEY：更新包必须签名，否则 createUpdaterArtifacts 会失败'
+            exit 1
+          }
+          Write-Host '更新签名密钥已配置；Authenticode 证书为可选（未配置则只出不签名包）'
+
+      # signCommand 需要绝对路径，所以不写进仓库里的 tauri.conf.json：
+      # 有证书时生成一份覆盖配置，没有证书就只出未签名包。
+      - name: Prepare optional Authenticode signing config
+        shell: pwsh
+        env:
+          ANR_WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          ANR_WINDOWS_CERT_THUMBPRINT: ${{ secrets.WINDOWS_CERT_THUMBPRINT }}
+        run: |
+          $script = '${{ github.workspace }}/.github/scripts/sign-windows.ps1'
+          $config = @{ bundle = @{ windows = @{} } }
+          if ($env:ANR_WINDOWS_CERT_PFX_BASE64 -or $env:ANR_WINDOWS_CERT_THUMBPRINT) {
+            Write-Host '已配置 Authenticode 证书：主程序与安装包都会签名'
+            $config.bundle.windows.signCommand = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$script`" %1"
+          } else {
+            Write-Host '没有配置 Authenticode 证书，本次只出未签名包（更新包仍会验签）'
+          }
+          $config | ConvertTo-Json -Depth 6 | Set-Content -Path 'app/src-tauri/tauri.signing.conf.json' -Encoding utf8
+          Get-Content 'app/src-tauri/tauri.signing.conf.json'
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 更新包签名（minisign，与 Authenticode 是两套东西）
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Authenticode：bundle.windows.signCommand 会调用 .github/scripts/sign-windows.ps1
+          ANR_WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          ANR_WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+          ANR_WINDOWS_CERT_THUMBPRINT: ${{ secrets.WINDOWS_CERT_THUMBPRINT }}
+        with:
+          projectPath: app
+          tagName: ${{ inputs.tag || github.ref_name }}
+          releaseName: ${{ inputs.tag || github.ref_name }}
+          releaseDraft: true
+          prerelease: false
+          args: --bundles nsis --config src-tauri/tauri.signing.conf.json
+
+      - name: Generate SHA256SUMS
+        shell: pwsh
+        run: |
+          $tag = '${{ inputs.tag || github.ref_name }}'
+          $bundle = 'app/src-tauri/target/release/bundle/nsis'
+          $files = Get-ChildItem -Path $bundle -Filter '*.exe'
+          if (-not $files) { Write-Error "没有找到安装包：$bundle"; exit 1 }
+          $lines = foreach ($f in $files) {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $f.FullName).Hash.ToLower()
+            "$hash  $($f.Name)"
+          }
+          $lines | Set-Content -Path 'SHA256SUMS.txt' -Encoding utf8
+          Get-Content 'SHA256SUMS.txt'
+          gh release upload $tag 'SHA256SUMS.txt' --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify updater manifest exists
+        shell: pwsh
+        run: |
+          # tauri-action 会把 latest.json 写进草稿 Release；这里只做可见性提示
+          gh release view '${{ inputs.tag || github.ref_name }}' --json assets --jq '.assets[].name'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
