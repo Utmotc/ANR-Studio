@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import {
+  Copy,
   Download,
   ExternalLink,
   FolderOpen,
@@ -84,6 +85,17 @@ export function SettingsDialog() {
   } = useApp();
   const [section, setSection] = useState<Section>('look');
   const close = () => setSettingsOpen(false);
+
+  const copyNotes = async () => {
+    const text = updateInfo?.notes?.trim();
+    if (!text) return;
+    try {
+      await navigator.clipboard?.writeText(text);
+      toast({ kind: 'info', title: '更新内容已复制' });
+    } catch {
+      /* 剪贴板不可用时忽略 */
+    }
+  };
 
   useEffect(() => {
     if (!settingsOpen) return;
@@ -463,7 +475,7 @@ export function SettingsDialog() {
                 >
                   <div className="flex items-center gap-1.5">
                     <span className="mono text-[11px] text-ink-3">
-                      v{typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '0.4.0'}
+                      v{typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '0.4.2'}
                     </span>
                     <button
                       className="btn btn-ghost h-7 text-[11px]"
@@ -473,18 +485,53 @@ export function SettingsDialog() {
                       <RefreshCw size={12} className={updateChecking ? 'animate-spin' : undefined} />
                       检查
                     </button>
-                    {updateInfo?.available && !updateDownloading && (
-                      <button
-                        className="btn btn-primary h-7 text-[11px]"
-                        onClick={() => void startUpdate()}
-                      >
-                        <Download size={12} />
-                        更新到 {updateInfo.version}
-                      </button>
-                    )}
                   </div>
                 </Row>
               </Group>
+
+              {updateInfo?.available && (
+                <section className="mb-5 overflow-hidden rounded-[14px] border border-accent-line bg-surface">
+                  <div className="flex items-start justify-between gap-3 border-b border-line-soft px-4 py-3">
+                    <div className="min-w-0">
+                      <p className="text-[12.5px] font-medium">
+                        v{updateInfo.version} 更新内容
+                      </p>
+                      <p className="mt-0.5 text-[11px] leading-relaxed text-ink-3">
+                        更新包会验签；下载完成后自动安装并重启
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      {!!updateInfo.notes?.trim() && (
+                        <button className="btn btn-ghost h-7 text-[11px]" onClick={() => void copyNotes()}>
+                          <Copy size={12} />
+                          复制
+                        </button>
+                      )}
+                      <button
+                        className="btn btn-ghost h-7 text-[11px]"
+                        onClick={() =>
+                          void openExternal(
+                            `https://github.com/Utmotc/ANR-Studio/releases/tag/v${updateInfo.version}`,
+                          )
+                        }
+                      >
+                        <ExternalLink size={12} />
+                        Release
+                      </button>
+                      <button
+                        className="btn btn-primary h-7 text-[11px]"
+                        disabled={updateDownloading}
+                        onClick={() => void startUpdate()}
+                      >
+                        {updateDownloading ? '更新中…' : '立即更新'}
+                      </button>
+                    </div>
+                  </div>
+                  <pre className="scroll-thin font-sans max-h-[200px] overflow-auto whitespace-pre-wrap px-4 py-3 text-[11.5px] leading-relaxed text-ink-2">
+                    {updateInfo.notes?.trim() || '这个版本没有附带更新说明。'}
+                  </pre>
+                </section>
+              )}
 
               <Group title="版本">
                 <Row title="ANR Studio" desc="非官方管理工具 · 桌面版">

@@ -115,6 +115,17 @@ export function Logs() {
     toast({ kind: 'info', title: '日志已复制到剪贴板' });
   };
 
+  const openLogDir = async () => {
+    // 优先打开日志文件所在目录；没有日志时退回游戏目录
+    const dir = logPath ? logPath.replace(/[\\/][^\\/]+$/, '') : game?.dir;
+    if (!dir) return;
+    try {
+      await call('open_path', { path: dir });
+    } catch {
+      toast({ kind: 'info', title: '日志目录', desc: dir });
+    }
+  };
+
   return (
     <div className="flex h-full">
       <aside className="scroll-thin w-[236px] shrink-0 overflow-y-auto border-r border-line py-3">
@@ -201,8 +212,9 @@ export function Logs() {
               </button>
               <button
                 className="btn btn-icon h-7 w-7"
-                onClick={() => toast({ kind: 'info', title: '日志目录', desc: game.dir })}
+                onClick={() => void openLogDir()}
                 aria-label="打开日志目录"
+                title="打开日志目录"
               >
                 <FolderOpen size={13} />
               </button>

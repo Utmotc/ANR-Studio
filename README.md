@@ -18,7 +18,7 @@ ANR（Apex Neural Rendering）的非官方图形化管理工具。把「跑命�
 到 [Releases](https://github.com/Utmotc/ANR-Studio/releases/latest) 下载 `ANR-Studio_x.y.z_x64-setup.exe`，双击安装即可。
 
 - 仅支持 **Windows 10 / 11 x64**
-- v0.4.0 起应用内可以检查并安装更新，更新包会**验签**（minisign，公钥内置）；v0.4.1 已包含诊断包脱敏修复，0.4.0 可以直接更新过去
+- v0.4.0 起应用内可以检查并安装更新，更新包会**验签**（minisign，公钥内置）；v0.4.2 检测到新版本时会在「设置 → 关于」直接展示该版本的更新内容，并可一键更新
 - 安装包是否带 Authenticode 签名取决于发布时是否配置了证书；未配置时首次运行仍会被 SmartScreen 拦一下：点「更多信息」→「仍要运行」
 - 需要已安装 **VC++ 运行库**（x64），游戏侧还需要官方 ANR 支持的显卡环境
 

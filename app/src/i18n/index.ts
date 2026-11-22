@@ -68,6 +68,16 @@ const PATCH: Record<string, string> = {
   '正在下载并安装更新，进度见任务中心': 'Downloading and installing — see the task center',
   还没检查过: 'Not checked yet',
   '· 每秒刷新': '· refreshing every second',
+  更新内容: 'release notes',
+  更新内容已复制: 'Release notes copied',
+  '更新包会验签；下载完成后自动安装并重启':
+    'The update is signature-verified; it installs and restarts after download',
+  '这个版本没有附带更新说明。': 'This release has no notes.',
+  立即更新: 'Update now',
+  '更新中…': 'Updating…',
+  '可在「设置 → 关于」查看更新内容并更新':
+    'See Settings → About for notes and to update',
+  '更新内容已列在「设置 → 关于」': 'Release notes are shown in Settings → About',
 };
 
 const DICTS: Record<Locale, Record<string, string>> = {

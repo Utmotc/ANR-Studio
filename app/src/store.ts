@@ -782,11 +782,14 @@ export const useApp = create<State>()((set, get) => {
           }
         } else if (get().settings.updateMode === 'auto') {
           void get().startUpdate();
-        } else if (manual) {
+        } else {
+          // 仅提示模式：启动时也弹一条，避免「发现更新」只安静地躺在关于页里
           get().toast({
             kind: 'info',
             title: `发现新版本 ${info.version}`,
-            desc: '可在「设置 → 关于」里一键更新',
+            desc: manual
+              ? '更新内容已列在「设置 → 关于」'
+              : '可在「设置 → 关于」查看更新内容并更新',
           });
         }
       } catch (e) {
@@ -1174,6 +1177,10 @@ export const useApp = create<State>()((set, get) => {
       }
       set({ settings });
       if (isTauri) void call('set_settings', { settings }).catch(() => undefined);
+      // 从「关闭」切到「自动 / 仅提示」时立刻查一次，不用等下次启动
+      if (patch.updateMode && patch.updateMode !== 'off' && isTauri) {
+        setTimeout(() => void get().checkUpdate(false), 500);
+      }
     },
 
     toggleSelect: (id) =>
